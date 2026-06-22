@@ -44,6 +44,21 @@ DEFAULT_INDEX_HEADINGS: dict[str, str] = {
     "pitfall": "Pitfalls / Operational Boundaries",
 }
 DEFAULT_INDEX_SECTION = "pitfall"
+FOLLOWUP_VERSION = "1"
+FOLLOWUP_KIND_TO_DIR: dict[str, str] = {
+    "skill_followup": "skill",
+    "module_doc_followup": "module-doc",
+}
+ACTION_TO_FOLLOWUP_KIND: dict[str, str] = {
+    "promote_to_skill": "skill_followup",
+    "promote_to_module_doc": "module_doc_followup",
+}
+ACTION_TO_HANDOFF: dict[str, str] = {
+    "promote_to_skill": "skill-creator",
+    "promote_to_module_doc": "doc-writer",
+}
+FOLLOWUP_STATUSES = {"open", "in_progress", "done", "rejected", "superseded"}
+FOLLOWUP_PROMOTE_ACTIONS = {"promote_to_skill", "promote_to_module_doc"}
 
 
 @dataclasses.dataclass
@@ -369,6 +384,132 @@ def suggested_destination_for_followup(action: str, frontmatter: dict[str, Any])
     return None
 
 
+def get_candidate_id(frontmatter: dict[str, Any], source_path: Path) -> str:
+    """Extract a stable candidate id from frontmatter or filename stem."""
+    raw = str(frontmatter.get("candidate_id") or "")
+    if raw.strip():
+        return slugify(raw)
+    return slugify(source_path.stem)
+
+
+def followup_kind_for_action(action: str) -> str | None:
+    return ACTION_TO_FOLLOWUP_KIND.get(action)
+
+
+def followup_dir_for_kind(kind: str) -> str | None:
+    return FOLLOWUP_KIND_TO_DIR.get(kind)
+
+
+def followup_files(root: Path, kind: str) -> list[Path]:
+    """List existing follow-up artifact files for a given kind."""
+    kind_dir = followup_dir_for_kind(kind)
+    if not kind_dir:
+        return []
+    followups_root = root / "knowledge/shared-memory/followups" / kind_dir
+    if not followups_root.exists():
+        return []
+    return sorted(path for path in followups_root.glob("*.json"))
+
+
+def find_existing_followup(root: Path, kind: str, candidate_id: str, source_candidate: str, source_action: str) -> tuple[Path | None, str | None]:
+    """Check for an existing follow-up artifact with the same source details.
+
+    Returns (existing_path, collision_type) where collision_type is:
+      - "exact": same sourceCandidate + sourceAction + kind (idempotent — skip)
+      - "id_collision": same candidate_id but different sourceCandidate (needs suffix)
+      - None: no existing follow-up found
+
+    An exact match takes priority over id collisions. The function scans all
+    files and returns the first exact match; only if no exact match exists
+    does it report an id collision.
+    """
+    existing_files = followup_files(root, kind)
+    id_collision_path: Path | None = None
+    for path in existing_files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        existing_source = data.get("sourceCandidate", "")
+        existing_action = data.get("sourceAction", "")
+        if existing_source == source_candidate and existing_action == source_action:
+            return path, "exact"
+        # Check for id collision: same candidate id, different source
+        existing_id = path.stem.rsplit("-", 1)[0] if "-" in path.stem else path.stem
+        if existing_id == candidate_id and existing_source != source_candidate:
+            id_collision_path = path
+    if id_collision_path:
+        return id_collision_path, "id_collision"
+    return None, None
+
+
+def unique_followup_path(root: Path, kind: str, candidate_id: str) -> Path:
+    """Find a unique path for a follow-up artifact, handling id collisions."""
+    kind_dir = followup_dir_for_kind(kind)
+    if not kind_dir:
+        raise ValueError(f"Unknown followup kind: {kind}")
+    followups_root = root / "knowledge/shared-memory/followups" / kind_dir
+    followups_root.mkdir(parents=True, exist_ok=True)
+
+    path = followups_root / f"{candidate_id}.json"
+    if not path.exists():
+        return path
+    # Check if it's truly a collision (same id, different sourceCandidate)
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        existing = {}
+    # If this is an exact match, return the original path (caller should skip)
+    # Otherwise, find a numeric suffix
+    for index in range(2, 100):
+        candidate_path = followups_root / f"{candidate_id}-{index}.json"
+        if not candidate_path.exists():
+            return candidate_path
+    raise RuntimeError(f"Could not find unique followup path for {candidate_id}")
+
+
+def render_followup_artifact(
+    source_candidate: str,
+    source_action: str,
+    frontmatter: dict[str, Any],
+    body: str,
+    suggested_destination: str,
+    reason: str,
+    evidence: list[str],
+    confidence: float,
+) -> dict[str, Any]:
+    """Build the follow-up artifact JSON dict."""
+    kind = followup_kind_for_action(source_action) or "skill_followup"
+    handoff_to = ACTION_TO_HANDOFF.get(source_action, "skill-creator")
+    name = clean_line(frontmatter.get("name"), 80) or "Untitled follow-up"
+    description = clean_line(frontmatter.get("description"), 180) or "Follow-up from absorption pipeline."
+    title = f"{name}: {description}"[:200].strip(": ").strip()
+
+    recommended: list[str] = []
+    raw_destination = frontmatter.get("destination") or ""
+    if raw_destination:
+        recommended.append(raw_destination)
+
+    artifact: dict[str, Any] = {
+        "version": FOLLOWUP_VERSION,
+        "kind": kind,
+        "status": "open",
+        "createdAt": now_iso(),
+        "sourceCandidate": source_candidate,
+        "sourceAction": source_action,
+        "suggestedDestination": suggested_destination,
+        "title": title,
+        "reason": reason,
+        "evidence": evidence,
+        "confidence": confidence,
+        "safeToAutoApply": False,
+        "handoffTo": handoff_to,
+    }
+    if recommended:
+        artifact["recommendedOutputs"] = recommended
+    return artifact
+
+
 def classify_workspace_backlog(root: Path) -> list[PlanAction]:
     actions: list[PlanAction] = []
     for path in workspace_memory_files(root):
@@ -584,19 +725,106 @@ def apply_plan(root: Path, plan: dict[str, Any], safe_only: bool) -> ApplyResult
     skipped: list[str] = []
     follow_ups: list[str] = []
     for action in plan.get("actions", []):
-        if safe_only and not action.get("safeToApply"):
-            if action.get("action") in {"promote_to_module_doc", "promote_to_skill", "deprecate", "move_scope"}:
-                follow_ups.append(f"{action['candidatePath']}: {action['action']} -> {action.get('destination') or '(needs destination)'}")
+        action_name = action.get("action", "")
+        candidate_path = action.get("candidatePath", "")
+
+        # Follow-up artifact creation for promote actions (safe mechanical action)
+        if action_name in FOLLOWUP_PROMOTE_ACTIONS:
+            followup_result = apply_followup_artifact(root, action)
+            if followup_result.get("existing"):
+                follow_ups.append(
+                    f"{candidate_path}: {action_name} (existing follow-up at {followup_result['path']})"
+                )
+            elif followup_result.get("path"):
+                changed.append(followup_result["path"])
+                follow_ups.append(
+                    f"{candidate_path}: {action_name} → followup {followup_result['path']}"
+                )
+            elif followup_result.get("error"):
+                skipped.append(followup_result["error"])
             continue
-        if action.get("action") == "retain_memory" and action.get("safeToApply"):
+
+        if safe_only and not action.get("safeToApply"):
+            if action_name in {"deprecate", "move_scope"}:
+                follow_ups.append(f"{candidate_path}: {action_name} -> {action.get('destination') or '(needs destination)'}")
+            continue
+
+        if action_name == "retain_memory" and action.get("safeToApply"):
             action_changed, error = apply_retain_memory(root, action)
             if error:
                 skipped.append(error)
             else:
                 changed.extend(action_changed)
-        elif action.get("action") != "keep_inbox":
-            follow_ups.append(f"{action['candidatePath']}: {action['action']} -> {action.get('destination') or '(needs destination)'}")
+        elif action_name != "keep_inbox":
+            follow_ups.append(f"{candidate_path}: {action_name} -> {action.get('destination') or '(needs destination)'}")
     return ApplyResult(sorted(set(changed)), skipped, follow_ups)
+
+
+def apply_followup_artifact(root: Path, action: dict[str, Any]) -> dict[str, Any]:
+    """Create a follow-up artifact for a promote action.
+
+    Returns a dict with keys:
+      - path: relative path of the created followup file
+      - existing: true if an identical followup already exists
+      - error: error message if creation failed
+    """
+    candidate_path_str = action.get("candidatePath", "")
+    action_name = action.get("action", "")
+    if not candidate_path_str or action_name not in FOLLOWUP_PROMOTE_ACTIONS:
+        return {"error": f"Invalid action for followup: {action_name}"}
+
+    source_path = root / candidate_path_str
+    if not source_path.exists():
+        return {"error": f"Source candidate not found: {candidate_path_str}"}
+
+    text = source_path.read_text(encoding="utf-8")
+    frontmatter, body = parse_frontmatter(text)
+
+    kind = followup_kind_for_action(action_name)
+    if not kind:
+        return {"error": f"Unknown followup kind for action: {action_name}"}
+
+    candidate_id = get_candidate_id(frontmatter, source_path)
+
+    # Idempotency check: same sourceCandidate + sourceAction → skip
+    existing_path, collision = find_existing_followup(
+        root, kind, candidate_id, candidate_path_str, action_name
+    )
+    if collision == "exact":
+        return {"path": rel(root, existing_path), "existing": True}
+
+    # Determine suggested destination
+    destination = action.get("destination") or ""
+    if not destination:
+        destination = suggested_destination_for_followup(action_name, frontmatter) or "(needs destination)"
+
+    reason = action.get("reason", "")
+    evidence = action.get("evidence", [])
+    if not isinstance(evidence, list):
+        evidence = [str(evidence)] if evidence else []
+    confidence = float(action.get("confidence", 0.5))
+
+    artifact = render_followup_artifact(
+        source_candidate=candidate_path_str,
+        source_action=action_name,
+        frontmatter=frontmatter,
+        body=body,
+        suggested_destination=destination,
+        reason=reason,
+        evidence=evidence,
+        confidence=confidence,
+    )
+
+    # Determine output path (handles numeric suffix for id collisions)
+    followup_path = unique_followup_path(root, kind, candidate_id)
+
+    followup_path.parent.mkdir(parents=True, exist_ok=True)
+    followup_path.write_text(
+        json.dumps(artifact, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    return {"path": rel(root, followup_path)}
 
 
 def run(command: list[str], cwd: Path, timeout: int = 300) -> subprocess.CompletedProcess[str]:
@@ -658,6 +886,20 @@ def add_threshold_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workspace-max-count", type=int, default=None)
 
 
+def _rebuild_query_index(root: Path) -> None:
+    """Invoke knowledge_query.py rebuild-index as a subprocess."""
+    query_script = root / "scripts" / "knowledge_query.py"
+    if not query_script.exists():
+        print(f"[absorb] knowledge_query.py not found at {query_script}, skipping index rebuild", file=sys.stderr)
+        return
+    print(f"[absorb] Rebuilding query index via {query_script}...", file=sys.stderr)
+    result = run([sys.executable, str(query_script), "--root", str(root), "rebuild-index"], cwd=root, timeout=60)
+    if result.returncode != 0:
+        print(f"[absorb] Query index rebuild failed: {result.stderr or result.stdout}", file=sys.stderr)
+    else:
+        print("[absorb] Query index rebuilt successfully.", file=sys.stderr)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Absorb shared-memory inbox candidates")
     parser.add_argument("--root", default=".", help="Workspace root or path inside it")
@@ -684,10 +926,20 @@ def build_parser() -> argparse.ArgumentParser:
     apply_parser.add_argument("--plan-file", default="")
     apply_parser.add_argument("--safe-only", action="store_true")
     apply_parser.add_argument("--include-workspace-backlog", action="store_true")
+    apply_parser.add_argument(
+        "--rebuild-query-index",
+        action="store_true",
+        help="Rebuild the query index after applying actions",
+    )
     add_threshold_args(apply_parser)
 
     hook = subparsers.add_parser("hook", help="Run local hook pressure check and safe auto-apply")
     hook.add_argument("--format", choices=("text", "json"), default="text")
+    hook.add_argument(
+        "--rebuild-query-index",
+        action="store_true",
+        help="Rebuild the query index after hook auto-apply",
+    )
     add_threshold_args(hook)
     return parser
 
@@ -712,9 +964,14 @@ def main() -> int:
         plan = load_plan(root, args)
         result = apply_plan(root, plan, args.safe_only)
         emit(dataclasses.asdict(result), args.format)
-        return 1 if result.skipped else 0
+        ret = 1 if result.skipped else 0
+        if getattr(args, "rebuild_query_index", False):
+            _rebuild_query_index(root)
+        return ret
     if args.command == "hook":
         emit(run_hook(root, args), args.format)
+        if getattr(args, "rebuild_query_index", False):
+            _rebuild_query_index(root)
         return 0
     raise AssertionError(args.command)
 

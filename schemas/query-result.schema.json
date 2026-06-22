@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-shared-memory/schemas/query-result.schema.json",
+  "title": "Query Result",
+  "description": "Deterministic query result from shared-memory query layer. Produced by search, resolve, and explain subcommands.",
+  "type": "object",
+  "required": ["version", "generatedAt", "query", "results", "excluded"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1",
+      "description": "Schema version for the query result format."
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the query was executed."
+    },
+    "query": {
+      "type": "object",
+      "required": ["text", "command", "filters"],
+      "description": "Context of the executed query.",
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "Query text that was searched."
+        },
+        "command": {
+          "type": "string",
+          "enum": ["search", "resolve", "inject", "explain"],
+          "description": "The subcommand that produced this result."
+        },
+        "filters": {
+          "type": "object",
+          "description": "Active filters applied during the query.",
+          "properties": {
+            "module": {
+              "type": "string",
+              "description": "Module scope filter."
+            },
+            "capability": {
+              "type": "string",
+              "description": "Capability scope filter."
+            },
+            "taskType": {
+              "type": "string",
+              "description": "Task type filter."
+            },
+            "scope": {
+              "type": "string",
+              "description": "Explicit scope filter."
+            },
+            "type": {
+              "type": "string",
+              "description": "Entry type filter."
+            }
+          }
+        }
+      }
+    },
+    "results": {
+      "type": "array",
+      "description": "Selected memory entries matching the query, ordered by score descending.",
+      "items": {
+        "$ref": "#/$defs/resultEntry"
+      }
+    },
+    "excluded": {
+      "type": "array",
+      "description": "Entries that matched the search but were excluded by filters or ranking.",
+      "items": {
+        "$ref": "#/$defs/excludedEntry"
+      }
+    }
+  },
+  "$defs": {
+    "resultEntry": {
+      "type": "object",
+      "required": ["id", "path", "scope", "type", "name", "description", "score", "reasons", "scoreBreakdown"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Deterministic entry ID derived from path and scope."
+        },
+        "path": {
+          "type": "string",
+          "description": "Relative path from workspace root to the Markdown source file."
+        },
+        "scope": {
+          "type": "string",
+          "description": "Full scope string (workspace, module:<name>, capability:<name>)."
+        },
+        "scope_type": {
+          "type": "string",
+          "enum": ["workspace", "module", "capability"],
+          "description": "Scope category."
+        },
+        "scope_name": {
+          "type": "string",
+          "description": "Module or capability name (empty for workspace)."
+        },
+        "type": {
+          "type": "string",
+          "description": "Memory entry type (feedback, reference, architectural-invariant, etc.)."
+        },
+        "name": {
+          "type": "string",
+          "description": "Entry name from frontmatter."
+        },
+        "description": {
+          "type": "string",
+          "description": "Entry description from frontmatter."
+        },
+        "verified_at": {
+          "type": "string",
+          "description": "ISO date when the entry was last verified."
+        },
+        "source": {
+          "type": "string",
+          "description": "Capture source of the entry."
+        },
+        "status": {
+          "type": "string",
+          "description": "Entry status."
+        },
+        "tags": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Tags associated with the entry."
+        },
+        "body_hash": {
+          "type": "string",
+          "description": "SHA-256 hash of the entry body text."
+        },
+        "updated_at": {
+          "type": "string",
+          "description": "ISO date from file modification time."
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Final composite relevance score (higher is better)."
+        },
+        "reasons": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Human-readable reasons for the score and selection."
+        },
+        "scoreBreakdown": {
+          "type": "object",
+          "required": ["fts", "scope", "type"],
+          "description": "Component breakdown of the composite score.",
+          "properties": {
+            "fts": {
+              "type": "number",
+              "description": "Base FTS BM25 score, normalized to [0, 1]."
+            },
+            "scope": {
+              "type": "number",
+              "description": "Scope match boost."
+            },
+            "type": {
+              "type": "number",
+              "description": "Entry type boost/penalty."
+            },
+            "name_match": {
+              "type": "number",
+              "description": "Boost for query text match in entry name."
+            },
+            "description_match": {
+              "type": "number",
+              "description": "Boost for query text match in entry description."
+            },
+            "staleness_penalty": {
+              "type": "number",
+              "description": "Penalty for stale verified_at date."
+            }
+          }
+        }
+      }
+    },
+    "excludedEntry": {
+      "type": "object",
+      "required": ["id", "path", "name", "reasons"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Deterministic entry ID."
+        },
+        "path": {
+          "type": "string",
+          "description": "Relative path to the Markdown source file."
+        },
+        "name": {
+          "type": "string",
+          "description": "Entry name from frontmatter."
+        },
+        "scope": {
+          "type": "string",
+          "description": "Full scope string."
+        },
+        "type": {
+          "type": "string",
+          "description": "Memory entry type."
+        },
+        "reasons": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Reasons why the entry was excluded."
+        }
+      }
+    }
+  }
+}

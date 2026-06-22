@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-shared-memory/schemas/followup.schema.json",
+  "title": "Shared-memory follow-up artifact",
+  "description": "Trackable handoff task for downstream agents (skill-creator, doc-writer) produced when absorption classifies a candidate as promote_to_skill or promote_to_module_doc.",
+  "type": "object",
+  "required": [
+    "version",
+    "kind",
+    "status",
+    "createdAt",
+    "sourceCandidate",
+    "sourceAction",
+    "suggestedDestination",
+    "title",
+    "reason",
+    "evidence",
+    "confidence",
+    "safeToAutoApply",
+    "handoffTo"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Follow-up artifact schema version."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["skill_followup", "module_doc_followup"],
+      "description": "The type of downstream work this handoff targets."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["open", "in_progress", "done", "rejected", "superseded"],
+      "description": "Current lifecycle status of the follow-up task."
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when this artifact was first created."
+    },
+    "sourceCandidate": {
+      "type": "string",
+      "description": "Relative path to the inbox candidate that triggered this follow-up."
+    },
+    "sourceAction": {
+      "type": "string",
+      "enum": ["promote_to_skill", "promote_to_module_doc"],
+      "description": "The absorption action that triggered this follow-up."
+    },
+    "suggestedDestination": {
+      "type": "string",
+      "description": "Recommended destination path for the downstream artifact."
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable title for the follow-up task."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Why this candidate was classified for this action."
+    },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Evidence snippets from the original candidate supporting the classification."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Absorption classification confidence score (0.0 to 1.0)."
+    },
+    "safeToAutoApply": {
+      "type": "boolean",
+      "description": "Whether the downstream target action (skill/doc creation) is safe to auto-apply. Always false for follow-up artifacts."
+    },
+    "handoffTo": {
+      "type": "string",
+      "enum": ["skill-creator", "doc-writer"],
+      "description": "The downstream agent role responsible for completing this follow-up."
+    },
+    "recommendedOutputs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Recommended output paths or deliverables for the downstream agent."
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "description"],
+        "properties": {
+          "path": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      },
+      "description": "Completed output artifacts produced by the downstream agent."
+    }
+  },
+  "additionalProperties": false
+}

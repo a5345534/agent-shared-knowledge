@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-shared-memory/schemas/injection-context.schema.json",
+  "title": "Injection Context",
+  "description": "Prompt-ready injection context produced by the inject subcommand. Includes budget tracking, entry selection metadata, and rendered output.",
+  "type": "object",
+  "required": ["version", "generatedAt", "budget", "context", "entries", "rendered"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1",
+      "description": "Schema version for the injection context format."
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the injection was generated."
+    },
+    "budget": {
+      "type": "object",
+      "required": ["budgetChars", "usedChars", "remainingChars"],
+      "description": "Character budget tracking for the injection output.",
+      "properties": {
+        "budgetChars": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Requested character budget."
+        },
+        "usedChars": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Characters used in the rendered output."
+        },
+        "remainingChars": {
+          "type": "integer",
+          "description": "Budget remaining after rendering."
+        },
+        "approximateTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Approximate token count (chars / 4), informational only."
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "description": "The task context used to resolve and prioritize entries.",
+      "properties": {
+        "module": {
+          "type": "string",
+          "description": "Target module scope."
+        },
+        "capability": {
+          "type": "string",
+          "description": "Target capability scope."
+        },
+        "taskType": {
+          "type": "string",
+          "description": "Task type for context-aware selection."
+        }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "description": "All entries considered for injection, with inclusion/truncation metadata.",
+      "items": {
+        "$ref": "#/$defs/injectionEntry"
+      }
+    },
+    "rendered": {
+      "type": "string",
+      "description": "The rendered injection text (Markdown or JSON string)."
+    }
+  },
+  "$defs": {
+    "injectionEntry": {
+      "type": "object",
+      "required": ["id", "name", "path", "type", "scope", "included"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Deterministic entry ID."
+        },
+        "name": {
+          "type": "string",
+          "description": "Entry name."
+        },
+        "path": {
+          "type": "string",
+          "description": "Relative path to the Markdown source file."
+        },
+        "type": {
+          "type": "string",
+          "description": "Memory entry type."
+        },
+        "scope": {
+          "type": "string",
+          "description": "Full scope string."
+        },
+        "description": {
+          "type": "string",
+          "description": "Entry description."
+        },
+        "verified_at": {
+          "type": "string",
+          "description": "ISO date when the entry was last verified."
+        },
+        "score": {
+          "type": "number",
+          "description": "Composite relevance score."
+        },
+        "included": {
+          "type": "boolean",
+          "description": "Whether the entry body was included in the rendered output."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "Whether the entry body was truncated due to budget constraints."
+        },
+        "truncatedAt": {
+          "type": "integer",
+          "description": "Character position where truncation occurred."
+        },
+        "bodyLength": {
+          "type": "integer",
+          "description": "Full body character length before truncation."
+        },
+        "reasons": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Selection/inclusion/exclusion reasons."
+        }
+      }
+    }
+  }
+}
