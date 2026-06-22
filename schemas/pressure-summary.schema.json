@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-shared-memory/schemas/pressure-summary.schema.json",
+  "title": "Shared-memory pressure summary",
+  "type": "object",
+  "required": ["triggered", "reasons", "thresholds", "metrics"],
+  "properties": {
+    "triggered": { "type": "boolean" },
+    "reasons": { "type": "array", "items": { "type": "string" } },
+    "thresholds": {
+      "type": "object",
+      "required": ["inboxMaxAgeDays", "inboxMaxCount", "workspaceMaxCount"],
+      "properties": {
+        "inboxMaxAgeDays": { "type": "integer" },
+        "inboxMaxCount": { "type": "integer" },
+        "workspaceMaxCount": { "type": "integer" }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["inboxCount", "workspaceMemoryCount"],
+      "properties": {
+        "inboxCount": { "type": "integer" },
+        "oldestInboxAgeDays": { "type": ["integer", "null"] },
+        "oldestInboxPath": { "type": ["string", "null"] },
+        "workspaceMemoryCount": { "type": "integer" },
+        "deprecatedWorkspaceMemoryCount": { "type": "integer" }
+      }
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-shared-memory/schemas/absorption-plan.schema.json",
+  "title": "Shared-memory absorption plan",
+  "type": "object",
+  "required": ["version", "generatedAt", "trigger", "pressure", "actions"],
+  "properties": {
+    "version": { "type": "string" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "trigger": { "type": "string" },
+    "pressure": {
+      "type": "object",
+      "required": ["triggered", "reasons", "thresholds", "metrics"],
+      "properties": {
+        "triggered": { "type": "boolean" },
+        "reasons": { "type": "array", "items": { "type": "string" } },
+        "thresholds": { "type": "object" },
+        "metrics": { "type": "object" }
+      }
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["candidatePath", "action", "reason", "evidence", "confidence", "safeToApply"],
+        "properties": {
+          "candidatePath": { "type": "string" },
+          "action": {
+            "enum": [
+              "retain_memory",
+              "move_scope",
+              "promote_to_module_doc",
+              "promote_to_skill",
+              "deprecate",
+              "keep_inbox"
+            ]
+          },
+          "reason": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } },
+          "destination": { "type": ["string", "null"] },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "safeToApply": { "type": "boolean" },
+          "metadata": { "type": "object" }
+        }
+      }
+    }
+  }
+}
