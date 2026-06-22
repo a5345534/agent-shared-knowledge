@@ -83,8 +83,13 @@ def find_workspace_root(start: Path, allow_fallback: bool = False) -> Path:
             marker_path = candidate / marker
             if marker_path.exists():
                 return candidate
-    # Last resort: return start directory
-    return start.resolve() if start.resolve().is_dir() else start.resolve().parent
+    if allow_fallback:
+        return start.resolve() if start.resolve().is_dir() else start.resolve().parent
+    raise SystemExit(
+        f"Could not locate workspace root from {start}. "
+        f"Expected one of: {', '.join(markers)}. "
+        f"Use --allow-root-fallback to force the current directory."
+    )
 
 
 def rel(root: Path, path: Path) -> str:
@@ -871,7 +876,7 @@ def cmd_search(root: Path, args: argparse.Namespace) -> int:
 
             fts_rank = row["rank"] if row["rank"] is not None else -100.0
             score, breakdown, reasons = compute_score(
-                entry_dict, fts_rank, query_text, scope_filter, task_type=args.task_type or ""
+                entry_dict, fts_rank, query_text, scope_filter, task_type=getattr(args, "task_type", "") or ""
             )
 
             result_entry = {
@@ -1573,7 +1578,7 @@ def cmd_explain(root: Path, args: argparse.Namespace) -> int:
                 }
                 fts_rank = row["rank"] if row["rank"] is not None else -100.0
                 score, breakdown, reasons = compute_score(
-                    entry_dict, fts_rank, query_text, resolve_scope, task_type=args.task_type or ""
+                    entry_dict, fts_rank, query_text, resolve_scope, task_type=getattr(args, "task_type", "") or ""
                 )
                 selected.append({
                     "id": entry_dict["id"],
@@ -1765,6 +1770,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show excluded entries in output",
     )
+    search_parser.add_argument(
+        "--task-type",
+        help="Task type for ranking boost (not a hard filter)",
+    )
 
     # resolve
     resolve_parser = subparsers.add_parser(
@@ -1843,6 +1852,10 @@ def build_parser() -> argparse.ArgumentParser:
     explain_parser.add_argument(
         "--capability",
         help="Capability filter",
+    )
+    explain_parser.add_argument(
+        "--task-type",
+        help="Task type for ranking boost (not a hard filter)",
     )
 
     return parser
