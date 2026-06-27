@@ -24,20 +24,25 @@ Decision rule: **"Would another dev benefit from knowing this? → share it. Onl
 ## Directory Structure
 
 ```
-knowledge/facts/
-├── README.md                    # This file (convention docs + contributing guide)
+knowledge/
+├── facts/
+│   ├── README.md                # This file (convention docs + contributing guide)
+│   ├── workspace/               # Workspace-wide, always-on loaded
+│   │   ├── README.md
+│   │   ├── MEMORY.md            # Index (SHALL NOT exceed 200 lines)
+│   │   └── <name>.md            # Entry body
+│   ├── module/                  # Single-module scope
+│   │   ├── README.md
+│   │   └── <module>/<name>.md
+│   └── capability/              # Single-capability scope
+│       ├── README.md
+│       └── <capability>/<name>.md
 ├── inbox/                       # Generated candidates; not always-on
 │   └── README.md
-├── workspace/                   # Workspace-wide, always-on loaded
-│   ├── README.md
-│   ├── MEMORY.md                # Index (SHALL NOT exceed 200 lines)
-│   └── <name>.md                # Entry body
-├── module/                      # Single-module scope
-│   ├── README.md
-│   └── <module>/<name>.md
-└── capability/                  # Single-capability scope
+└── followups/                   # Absorption → downstream handoff
     ├── README.md
-    └── <capability>/<name>.md
+    ├── skill/
+    └── module-doc/
 ```
 
 ## Frontmatter Schema

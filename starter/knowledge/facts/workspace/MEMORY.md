@@ -4,7 +4,7 @@ Always-on index loaded into every agent session that reads the workspace guide f
 
 ## Architecture Invariants / Conventions
 
-<!-- Add entries here: - [Entry Name](file.md) — One-line description -->
+<!-- Add entries here, for example: - Entry Name — One-line description -->
 
 ## Agent Workflow / Pipeline
 

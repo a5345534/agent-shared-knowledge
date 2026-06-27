@@ -21,53 +21,61 @@ machine-readable** so:
 
 ## Quick Start
 
-### 1. Add the directory structure to your workspace
+### 1. Add this repository as a workspace submodule
+
+From the workspace root:
 
 ```bash
-mkdir -p knowledge/facts/{workspace,module,capability,inbox}
+git submodule add https://github.com/a5345534/agent-shared-knowledge.git shared-knowledge
 ```
 
-Copy the starter READMEs from `starter/knowledge/facts/` into your
-workspace.
-
-### 2. Install the scripts
+If the submodule is already recorded but not checked out, initialize it:
 
 ```bash
-# Copy the scripts into your agent workspace
-cp scripts/knowledge_absorb.py agent-workspace/skills/shared-memory/scripts/
-cp scripts/knowledge_lint.py agent-workspace/skills/shared-memory/scripts/
-cp scripts/knowledge_query.py agent-workspace/skills/shared-memory/scripts/
+git submodule update --init --recursive shared-knowledge
 ```
 
-### 3. Wire into your workspace guide (AGENTS.md)
-
-Add a `## Workspace Shared Memory` section to your `AGENTS.md` that references
-`knowledge/facts/workspace/MEMORY.md` as the always-on index (B1
-mechanism).
-
-### 4. Run periodic lint
+### 2. Run the init command
 
 ```bash
-python3 agent-workspace/skills/shared-memory/scripts/knowledge_lint.py
+python3 shared-knowledge/scripts/knowledge_query.py --root . init
+```
+
+This creates `knowledge/`, copies starter files, injects the B1 section into
+`AGENTS.md`, ignores the local SQLite index cache, builds the first query index,
+and installs the best available hook adapter.
+
+Useful variants:
+
+```bash
+python3 shared-knowledge/scripts/knowledge_query.py --root . init --skip-hook
+python3 shared-knowledge/scripts/knowledge_query.py --root . init --dry-run
+```
+
+### 3. Run periodic lint
+
+```bash
+python3 shared-knowledge/scripts/knowledge_lint.py --root .
 ```
 
 ## Directory Structure
 
 ```
-knowledge/facts/
-├── README.md                    # Convention docs + contributing guide
+knowledge/
+├── facts/
+│   ├── README.md                # Convention docs + contributing guide
+│   ├── workspace/               # Workspace-wide, always-on loaded
+│   │   ├── README.md
+│   │   ├── MEMORY.md            # Index (SHALL NOT exceed 200 lines)
+│   │   └── <name>.md            # Entry body
+│   ├── module/                  # Single-module scope
+│   │   ├── README.md
+│   │   └── <module>/<name>.md
+│   └── capability/              # Single-capability scope
+│       ├── README.md
+│       └── <capability>/<name>.md
 ├── inbox/                       # Generated candidates; not always-on
 │   └── README.md
-├── workspace/                   # Workspace-wide, always-on loaded
-│   ├── README.md
-│   ├── MEMORY.md                # Index (SHALL NOT exceed 200 lines)
-│   └── <name>.md                # Entry body
-├── module/                      # Single-module scope
-│   ├── README.md
-│   └── <module>/<name>.md
-├── capability/                  # Single-capability scope
-│   ├── README.md
-│   └── <capability>/<name>.md
 ├── followups/                   # Absorption → downstream handoff
 │   ├── README.md
 │   ├── skill/                   # promote_to_skill follow-up artifacts
@@ -119,16 +127,16 @@ thresholds are exceeded.
 
 ```bash
 # Check pressure
-python3 knowledge_absorb.py pressure
+python3 shared-knowledge/scripts/knowledge_absorb.py --root . pressure
 
 # Build plan
-python3 knowledge_absorb.py plan --format json
+python3 shared-knowledge/scripts/knowledge_absorb.py --root . plan --format json
 
 # Apply safe mechanical actions
-python3 knowledge_absorb.py apply --safe-only
+python3 shared-knowledge/scripts/knowledge_absorb.py --root . apply --safe-only
 
 # Run hook (pressure check + safe auto-apply)
-python3 knowledge_absorb.py hook
+python3 shared-knowledge/scripts/knowledge_absorb.py --root . hook
 ```
 
 ### `knowledge_lint.py` — Knowledge Surface Lint
@@ -139,22 +147,22 @@ artifact contract compliance and aging, and optionally checks the query index.
 
 ```bash
 # Full lint
-python3 knowledge_lint.py
+python3 shared-knowledge/scripts/knowledge_lint.py --root .
 
 # JSON output with pressure summary
-python3 knowledge_lint.py --format json --pressure-summary
+python3 shared-knowledge/scripts/knowledge_lint.py --root . --format json --pressure-summary
 
 # Dry-run mechanical fixes
-python3 knowledge_lint.py --fix
+python3 shared-knowledge/scripts/knowledge_lint.py --root . --fix
 
 # Apply safe mechanical fixes
-python3 knowledge_lint.py --fix --apply
+python3 shared-knowledge/scripts/knowledge_lint.py --root . --fix --apply
 
 # Also check query index staleness
-python3 knowledge_lint.py --check-query-index
+python3 shared-knowledge/scripts/knowledge_lint.py --root . --check-query-index
 
 # Custom follow-up aging threshold
-SHARED_MEMORY_FOLLOWUP_MAX_AGE_DAYS=60 python3 knowledge_lint.py
+SHARED_MEMORY_FOLLOWUP_MAX_AGE_DAYS=60 python3 shared-knowledge/scripts/knowledge_lint.py --root .
 ```
 
 ### `knowledge_query.py` — Deterministic Query CLI
@@ -165,23 +173,23 @@ explainable scoring.
 
 ```bash
 # Build the query index
-python3 knowledge_query.py rebuild-index
+python3 shared-knowledge/scripts/knowledge_query.py --root . rebuild-index
 
 # List entries with filters
-python3 knowledge_query.py list --scope workspace
-python3 knowledge_query.py list --type architectural-invariant
+python3 shared-knowledge/scripts/knowledge_query.py --root . list --scope workspace
+python3 shared-knowledge/scripts/knowledge_query.py --root . list --type architectural-invariant
 
 # Full-text search with BM25 + boost/penalty scoring
-python3 knowledge_query.py search "validation hook"
+python3 shared-knowledge/scripts/knowledge_query.py --root . search "validation hook"
 
 # Resolve relevant entries by module/capability scope
-python3 knowledge_query.py resolve --module workflow --capability agent-orchestration
+python3 shared-knowledge/scripts/knowledge_query.py --root . resolve --module workflow --capability agent-orchestration
 
 # Produce prompt-ready Markdown injection
-python3 knowledge_query.py inject --module workflow --budget-chars 4000 --format markdown
+python3 shared-knowledge/scripts/knowledge_query.py --root . inject --module workflow --budget-chars 4000 --format markdown
 
 # Explain why entries were selected or excluded
-python3 knowledge_query.py explain --query "validation hook"
+python3 shared-knowledge/scripts/knowledge_query.py --root . explain --query "validation hook"
 ```
 
 ### Follow-up Artifact Workflow
@@ -194,10 +202,10 @@ skills or writing module docs.
 
 ```bash
 # Apply safe actions (creates follow-up artifacts)
-python3 knowledge_absorb.py apply --safe-only
+python3 shared-knowledge/scripts/knowledge_absorb.py --root . apply --safe-only
 
 # Apply + rebuild query index
-python3 knowledge_absorb.py apply --safe-only --rebuild-query-index
+python3 shared-knowledge/scripts/knowledge_absorb.py --root . apply --safe-only --rebuild-query-index
 ```
 
 Follow-up artifact status lifecycle:

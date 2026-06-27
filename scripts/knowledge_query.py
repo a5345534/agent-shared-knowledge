@@ -6,7 +6,7 @@ shared memory entries and supports rebuild-index, list, search, resolve,
 inject, and explain subcommands.
 
 The SQLite index is a rebuildable cache; Markdown entries in
-knowledge/shared-memory/ are the source of truth.
+knowledge/facts/ are the source of truth.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ VALID_MEMORY_TYPES = {
 
 VALID_SCOPE_RE = re.compile(r"^(workspace|module:[a-z0-9][a-z0-9-]*|capability:[a-z0-9][a-z0-9-]*)$")
 
-# Top-level directories under knowledge/shared-memory to scan for curated entries.
+# Top-level directories under knowledge/facts to scan for curated entries.
 SCAN_DIRS = ("workspace", "module", "capability")
 
 # Directories / files to skip during scanning.
@@ -69,7 +69,7 @@ def find_workspace_root(start: Path, allow_fallback: bool = False) -> Path:
 
     Strategy (in order):
     1. Walk up from *start* to find AGENTS.md (existing convention).
-    2. Walk up to find knowledge/shared-memory/ directory.
+    2. Walk up to find knowledge/facts/ directory.
     3. Walk up to find goal-dag-spec.json.
     4. Fall back to *start* itself if nothing else matches.
     """
@@ -214,7 +214,7 @@ def entry_id(relative_path: str, scope: str) -> str:
 
 
 def collect_curated_entries(root: Path) -> list[MemoryEntry]:
-    """Scan knowledge/shared-memory/{workspace,module,capability}/ for .md files.
+    """Scan knowledge/facts/{workspace,module,capability}/ for .md files.
 
     Skips README.md, MEMORY.md, inbox/, followups/ directories.
     """
@@ -493,7 +493,7 @@ def compute_content_hash(entries: list[MemoryEntry]) -> str:
 # ---------------------------------------------------------------------------
 
 def write_manifest(root: Path, sqlite_path: Path, entry_count: int, content_hash: str) -> Path:
-    """Write knowledge/shared-memory/.index/manifest.json."""
+    """Write knowledge/.index/manifest.json."""
     manifest_dir = root / "knowledge" / ".index"
     manifest_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -1704,6 +1704,423 @@ def cmd_explain(root: Path, args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Init subcommand helpers (Slice 1)
+# ---------------------------------------------------------------------------
+
+
+def _init_create_directories(root: Path) -> dict:
+    """Create the knowledge directory structure.
+
+    Creates all required directories under root. Skips any that already
+    exist (idempotent). Returns {status, message, created, existed}.
+    """
+    dirs = [
+        "knowledge/facts/workspace",
+        "knowledge/facts/module",
+        "knowledge/facts/capability",
+        "knowledge/inbox",
+        "knowledge/followups/skill",
+        "knowledge/followups/module-doc",
+        "knowledge/.index",
+    ]
+    created = 0
+    existed = 0
+    failures: list[str] = []
+    for d in dirs:
+        target = root / d
+        if target.exists():
+            existed += 1
+            continue
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            created += 1
+        except OSError as exc:
+            failures.append(f"{d}: {exc}")
+
+    status = "ok" if not failures else "failed"
+    parts: list[str] = []
+    if created:
+        parts.append(f"{created} created")
+    if existed:
+        parts.append(f"{existed} already existed")
+    if failures:
+        parts.append(f"{len(failures)} failed")
+    return {
+        "status": status,
+        "message": ", ".join(parts) if parts else "(no change)",
+        "created": created,
+        "existed": existed,
+        "failures": failures,
+    }
+
+
+def _init_copy_starters(root: Path) -> dict:
+    """Copy starter files from the installed starter directory.
+
+    Pattern:
+      starter/knowledge/facts/README.md -> knowledge/facts/README.md
+      starter/knowledge/facts/{workspace,module,capability}/README.md
+        -> knowledge/facts/{workspace,module,capability}/README.md
+      starter/knowledge/facts/workspace/MEMORY.md
+        -> knowledge/facts/workspace/MEMORY.md
+      starter/knowledge/facts/inbox/README.md -> knowledge/inbox/README.md
+      starter/knowledge/facts/followups/** -> knowledge/followups/**
+
+    Skips any target file that already exists (idempotent).
+    Returns {status, message, copies, skipped}.
+    """
+    # Try script-relative path first (when script is inside the repo),
+    # then fall back to workspace-relative path (when script is at root).
+    starter_candidates = [
+        Path(__file__).resolve().parent.parent / "starter" / "knowledge" / "facts",
+        root / "shared-knowledge" / "starter" / "knowledge" / "facts",
+    ]
+    starter_base: Path | None = None
+    for candidate in starter_candidates:
+        if candidate.is_dir():
+            starter_base = candidate
+            break
+
+    if starter_base is None:
+        tried = ", ".join(str(c) for c in starter_candidates)
+        return {
+            "status": "failed",
+            "message": f"Starter directory not found (tried: {tried})",
+            "copies": [],
+            "skipped": [],
+        }
+
+    copies: list[str] = []
+    skipped: list[str] = []
+    failures: list[str] = []
+
+    def copy_file(src: Path, dst: Path, label: str) -> None:
+        if not src.exists():
+            return
+        if dst.exists():
+            skipped.append(label)
+            return
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            copies.append(label)
+        except OSError as exc:
+            failures.append(f"{label}: {exc}")
+
+    # Curated facts convention docs.
+    copy_file(starter_base / "README.md", root / "knowledge" / "facts" / "README.md", "facts/README.md")
+    for scope_dir in ("workspace", "module", "capability"):
+        copy_file(
+            starter_base / scope_dir / "README.md",
+            root / "knowledge" / "facts" / scope_dir / "README.md",
+            f"facts/{scope_dir}/README.md",
+        )
+
+    # Workspace always-on index.
+    copy_file(
+        starter_base / "workspace" / "MEMORY.md",
+        root / "knowledge" / "facts" / "workspace" / "MEMORY.md",
+        "facts/workspace/MEMORY.md",
+    )
+
+    # Inbox and follow-up artifacts live under knowledge/, not knowledge/facts/.
+    copy_file(starter_base / "inbox" / "README.md", root / "knowledge" / "inbox" / "README.md", "inbox/README.md")
+    copy_file(starter_base / "followups" / "README.md", root / "knowledge" / "followups" / "README.md", "followups/README.md")
+    for kind in ("skill", "module-doc"):
+        copy_file(
+            starter_base / "followups" / kind / ".gitkeep",
+            root / "knowledge" / "followups" / kind / ".gitkeep",
+            f"followups/{kind}/.gitkeep",
+        )
+
+    status = "skipped" if (not copies and not failures) else ("ok" if not failures else "failed")
+    parts: list[str] = []
+    if copies:
+        parts.append(f"{len(copies)} copied")
+    if skipped:
+        parts.append(f"{len(skipped)} skipped")
+    if failures:
+        parts.append(f"{len(failures)} failed")
+    return {
+        "status": status,
+        "message": ", ".join(parts) if parts else "(no starter files found)",
+        "copies": copies,
+        "skipped": skipped,
+        "failures": failures,
+    }
+
+
+def _init_inject_b1(root: Path) -> dict:
+    """Ensure AGENTS.md contains the B1 shared-knowledge section.
+
+    Uses `<!-- shared-knowledge B1 -->` sentinel to detect existing injection.
+    If AGENTS.md exists without sentinel, appends B1 section.
+    If AGENTS.md does not exist, creates it with B1 section.
+    """
+    agents_md = root / "AGENTS.md"
+    sentinel = "<!-- shared-knowledge B1 -->"
+    b1_section = f"""
+{sentinel}
+## Workspace Shared Knowledge
+
+See `knowledge/facts/workspace/MEMORY.md` for the workspace always-on shared-memory index.
+"""
+
+    if agents_md.exists():
+        content = agents_md.read_text(encoding="utf-8")
+        if sentinel in content:
+            return {"status": "skipped", "message": "B1 section already present"}
+        # Append, ensuring newline before
+        with agents_md.open("a", encoding="utf-8") as f:
+            if not content.endswith("\n"):
+                f.write("\n")
+            f.write(b1_section.lstrip("\n"))
+        return {"status": "ok", "message": "B1 section appended"}
+    else:
+        agents_md.write_text(f"# AGENTS.md\n{b1_section}", encoding="utf-8")
+        return {"status": "ok", "message": "AGENTS.md created with B1 section"}
+
+
+def _init_ensure_gitignore(root: Path) -> dict:
+    """Ensure .gitignore contains the knowledge/.index/ entry.
+
+    The SQLite index cache at knowledge/.index/ must not be tracked in git.
+    If .gitignore does not exist, creates it with the entry.
+    If .gitignore exists without the entry, appends it.
+    """
+    gitignore = root / ".gitignore"
+    line = "knowledge/.index/"
+
+    if gitignore.exists():
+        content = gitignore.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        if line in lines:
+            return {"status": "skipped", "message": "knowledge/.index/ already in .gitignore"}
+        # Append at end, ensuring newline separator
+        with gitignore.open("a", encoding="utf-8") as f:
+            if content and not content.endswith("\n"):
+                f.write("\n")
+            f.write(f"{line}\n")
+        return {"status": "ok", "message": "knowledge/.index/ added to .gitignore"}
+    else:
+        gitignore.write_text(f"{line}\n", encoding="utf-8")
+        return {"status": "ok", "message": ".gitignore created with knowledge/.index/"}
+
+
+def _init_rebuild_index(root: Path) -> dict:
+    """Run rebuild-index internally and report the result.
+
+    Zero entries is a valid result (user adds facts later).
+    """
+    try:
+        exit_code = cmd_rebuild_index(root)
+        if exit_code == 0:
+            # Count entries in the fresh index
+            sqlite_path = root / "knowledge" / ".index" / "memory.sqlite"
+            count = 0
+            if sqlite_path.exists():
+                try:
+                    db = sqlite3.connect(str(sqlite_path))
+                    count = db.execute("SELECT COUNT(*) FROM memory_entries").fetchone()[0]
+                    db.close()
+                except (sqlite3.OperationalError, Exception):
+                    pass
+            return {"status": "ok", "message": f"{count} entries indexed"}
+        return {"status": "failed", "message": f"rebuild-index exited with code {exit_code}"}
+    except Exception as exc:
+        return {"status": "failed", "message": f"rebuild-index failed: {exc}"}
+
+
+def detect_harness(root: Path) -> tuple[str, str]:
+    """Detect the active agent harness environment.
+
+    Checks well-known markers in priority order:
+      1. Pi: ~/.pi/ directory exists
+      2. OpenCode: .opencode.json in workspace root
+      3. GitHub Actions: GITHUB_ACTIONS environment variable set
+      4. None: fallback
+
+    Returns (harness_name, module_path) where module_path is the dotted
+    import path for the matching adapter (e.g. "hooks.pi").
+    """
+    # Priority 1: Pi harness
+    if (Path.home() / ".pi").is_dir():
+        return "pi", "hooks.pi"
+
+    # Priority 2: OpenCode harness
+    if (root / ".opencode.json").is_file():
+        return "opencode", "hooks.opencode"
+
+    # Priority 3: GitHub Actions CI
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        return "github-actions", "hooks.github_actions"
+
+    # Priority 4: No harness detected
+    return "none", "hooks.none"
+
+
+def _init_install_hook(root: Path, dry_run: bool = False) -> dict:
+    """Detect the active harness and install the matching hook adapter.
+
+    Uses detect_harness() to find the active harness, then dynamically
+    imports the matching adapter module and calls its install() function.
+
+    In dry_run mode, returns what would happen without making changes.
+    Returns {status, message, path, harness}.
+    """
+    harness_name, module_path = detect_harness(root)
+
+    if dry_run:
+        if harness_name == "none":
+            return {
+                "status": "ok",
+                "message": f"[dry-run] would print manual hook instructions (harness: {harness_name})",
+                "path": None,
+                "harness": harness_name,
+            }
+        return {
+            "status": "ok",
+            "message": f"[dry-run] would install {harness_name} hook adapter",
+            "path": None,
+            "harness": harness_name,
+        }
+
+    # Verified safe: importlib.import_module is stdlib.
+    import importlib
+    try:
+        adapter = importlib.import_module(module_path)
+    except (ImportError, ModuleNotFoundError) as exc:
+        return {
+            "status": "failed",
+            "message": f"Failed to load adapter {module_path}: {exc}",
+            "path": None,
+            "harness": harness_name,
+        }
+
+    result = adapter.install(root)
+    result["harness"] = harness_name
+    return result
+
+
+def cmd_init(root: Path, args: argparse.Namespace | None = None) -> int:
+    """Run the init subcommand: bootstrap the shared-knowledge workspace.
+
+    Orchestrates all init steps in order:
+      1. Create directory structure
+      2. Copy starter files
+      3. B1 injection into AGENTS.md
+      4. .gitignore check
+      5. First rebuild-index
+      6. Hook adapter installation (via harness detection)
+
+    Supports --skip-hook (skip step 6) and --dry-run (print what would
+    be done without making changes). Each step checks preconditions before
+    acting, making init idempotent (unless --dry-run is used).
+    """
+    skip_hook = getattr(args, "skip_hook", False) if args else False
+    dry_run = getattr(args, "dry_run", False) if args else False
+
+    print("knowledge init")
+    if dry_run:
+        print("  [dry-run] No changes will be made.")
+    print()
+
+    steps: list[tuple[str, dict]] = []
+
+    if dry_run:
+        # Dry-run: report what would happen without making changes
+        steps.append(("📁  directories", {
+            "status": "ok",
+            "message": "[dry-run] would create knowledge/ directory structure",
+        }))
+        steps.append(("📄  starter files", {
+            "status": "ok",
+            "message": "[dry-run] would copy starter files from templates",
+        }))
+        # Check if B1 already exists
+        agents_md = root / "AGENTS.md"
+        sentinel = "<!-- shared-knowledge B1 -->"
+        if agents_md.exists() and sentinel in agents_md.read_text(encoding="utf-8"):
+            b1_msg = "[dry-run] B1 section already present (would skip)"
+        else:
+            b1_msg = "[dry-run] would inject B1 section into AGENTS.md"
+        steps.append(("📋  AGENTS.md", {"status": "ok", "message": b1_msg}))
+
+        gitignore = root / ".gitignore"
+        if gitignore.exists() and "knowledge/.index/" in gitignore.read_text(encoding="utf-8").splitlines():
+            gi_msg = "[dry-run] knowledge/.index/ already in .gitignore (would skip)"
+        else:
+            gi_msg = "[dry-run] would add knowledge/.index/ to .gitignore"
+        steps.append(("🙈  .gitignore", {"status": "ok", "message": gi_msg}))
+
+        steps.append(("🔍  query index", {
+            "status": "ok",
+            "message": "[dry-run] would rebuild query index",
+        }))
+
+        if not skip_hook:
+            harness_name, _ = detect_harness(root)
+            if harness_name == "none":
+                hook_msg = f"[dry-run] would print manual hook instructions (harness: {harness_name})"
+            else:
+                hook_msg = f"[dry-run] would install {harness_name} hook adapter"
+            steps.append(("🪝  hook", {"status": "ok", "message": hook_msg, "path": None, "harness": harness_name}))
+        else:
+            steps.append(("🪝  hook", {"status": "skipped", "message": "skipped (--skip-hook)"}))
+    else:
+        # Step 1: Create directories
+        result = _init_create_directories(root)
+        steps.append(("📁  directories", result))
+
+        # Step 2: Copy starter files
+        result = _init_copy_starters(root)
+        steps.append(("📄  starter files", result))
+
+        # Step 3: B1 injection into AGENTS.md
+        result = _init_inject_b1(root)
+        steps.append(("📋  AGENTS.md", result))
+
+        # Step 4: .gitignore check
+        result = _init_ensure_gitignore(root)
+        steps.append(("🙈  .gitignore", result))
+
+        # Step 5: Rebuild index
+        result = _init_rebuild_index(root)
+        steps.append(("🔍  query index", result))
+
+        # Step 6: Hook adapter (Slice 3 — harness detection + dispatch)
+        if not skip_hook:
+            result = _init_install_hook(root)
+            steps.append(("🪝  hook", result))
+        else:
+            steps.append(("🪝  hook", {"status": "skipped", "message": "skipped (--skip-hook)"}))
+
+    # Status report
+    all_ok = True
+    for label, result in steps:
+        s = result["status"]
+        if s == "ok":
+            icon = "✅"
+        elif s == "skipped":
+            icon = "⚠️"
+        else:
+            icon = "❌"
+            all_ok = False
+        print(f"  {icon}  {label:25s} {result['message']}")
+
+    print()
+    if dry_run:
+        print("Dry-run complete. Use `knowledge init` (without --dry-run) to apply changes.")
+    elif all_ok:
+        print("Ready. Add facts to knowledge/facts/, then `knowledge_query.py rebuild-index`.")
+        print("Run `knowledge_absorb.py hook` to absorb inbox candidates.")
+    else:
+        print("Some steps failed. Review the errors above.")
+
+    return 0 if all_ok else 1
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1858,6 +2275,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Task type for ranking boost (not a hard filter)",
     )
 
+    # init
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Bootstrap the shared-knowledge workspace (directories, starters, B1, gitignore, index, hook)",
+    )
+    init_parser.add_argument(
+        "--skip-hook",
+        action="store_true",
+        help="Skip harness detection and hook adapter installation",
+    )
+    init_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would be done without making any changes",
+    )
+
     return parser
 
 
@@ -1865,7 +2298,10 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    root = find_workspace_root(Path(args.root), allow_fallback=args.allow_root_fallback)
+    root = find_workspace_root(
+        Path(args.root),
+        allow_fallback=args.allow_root_fallback or args.command == "init",
+    )
 
     if args.command == "rebuild-index":
         return cmd_rebuild_index(root)
@@ -1879,6 +2315,8 @@ def main() -> int:
         return cmd_inject(root, args)
     elif args.command == "explain":
         return cmd_explain(root, args)
+    elif args.command == "init":
+        return cmd_init(root, args)
     else:
         parser.print_help()
         return 1
