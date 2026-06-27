@@ -36,6 +36,7 @@ workspace.
 # Copy the scripts into your agent workspace
 cp scripts/knowledge_absorb.py agent-workspace/skills/shared-memory/scripts/
 cp scripts/knowledge_lint.py agent-workspace/skills/shared-memory/scripts/
+cp scripts/knowledge_query.py agent-workspace/skills/shared-memory/scripts/
 ```
 
 ### 3. Wire into your workspace guide (AGENTS.md)
@@ -64,9 +65,16 @@ knowledge/shared-memory/
 ├── module/                      # Single-module scope
 │   ├── README.md
 │   └── <module>/<name>.md
-└── capability/                  # Single-capability scope
-    ├── README.md
-    └── <capability>/<name>.md
+├── capability/                  # Single-capability scope
+│   ├── README.md
+│   └── <capability>/<name>.md
+├── followups/                   # Absorption → downstream handoff
+│   ├── README.md
+│   ├── skill/                   # promote_to_skill follow-up artifacts
+│   └── module-doc/              # promote_to_module_doc follow-up artifacts
+└── .index/                      # Local SQLite FTS5 cache (git-ignored)
+    ├── memory.sqlite
+    └── manifest.json
 ```
 
 ## Frontmatter Schema
@@ -125,8 +133,9 @@ python3 knowledge_absorb.py hook
 
 ### `knowledge_lint.py` — Knowledge Surface Lint
 
-Validates shared memory entries, module maps, workspace guidance, and knowledge
-viewport for drift, staleness, and structural errors.
+Validates shared memory entries, module maps, workspace guidance, knowledge
+viewport for drift, staleness, and structural errors. Also validates follow-up
+artifact contract compliance and aging, and optionally checks the query index.
 
 ```bash
 # Full lint
@@ -140,7 +149,66 @@ python3 knowledge_lint.py --fix
 
 # Apply safe mechanical fixes
 python3 knowledge_lint.py --fix --apply
+
+# Also check query index staleness
+python3 knowledge_lint.py --check-query-index
+
+# Custom follow-up aging threshold
+SHARED_MEMORY_FOLLOWUP_MAX_AGE_DAYS=60 python3 knowledge_lint.py
 ```
+
+### `knowledge_query.py` — Deterministic Query CLI
+
+Builds a local SQLite FTS5 index from curated shared memory entries and provides
+subcommands for search, scope-based resolve, prompt-ready injection, and
+explainable scoring.
+
+```bash
+# Build the query index
+python3 knowledge_query.py rebuild-index
+
+# List entries with filters
+python3 knowledge_query.py list --scope workspace
+python3 knowledge_query.py list --type architectural-invariant
+
+# Full-text search with BM25 + boost/penalty scoring
+python3 knowledge_query.py search "validation hook"
+
+# Resolve relevant entries by module/capability scope
+python3 knowledge_query.py resolve --module workflow --capability agent-orchestration
+
+# Produce prompt-ready Markdown injection
+python3 knowledge_query.py inject --module workflow --budget-chars 4000 --format markdown
+
+# Explain why entries were selected or excluded
+python3 knowledge_query.py explain --query "validation hook"
+```
+
+### Follow-up Artifact Workflow
+
+When absorption classifies an inbox candidate as `promote_to_skill` or
+`promote_to_module_doc`, a structured JSON follow-up artifact is created under
+`knowledge/shared-memory/followups/`. The artifact tracks status, evidence,
+recommended outputs, and (when completed) actual outputs — without creating
+skills or writing module docs.
+
+```bash
+# Apply safe actions (creates follow-up artifacts)
+python3 knowledge_absorb.py apply --safe-only
+
+# Apply + rebuild query index
+python3 knowledge_absorb.py apply --safe-only --rebuild-query-index
+```
+
+Follow-up artifact status lifecycle:
+
+| Status | Meaning |
+|--------|---------|
+| `open` | Created but not yet picked up |
+| `in_progress` | An agent is working on it |
+| `done` | Completed; `outputs` field must be non-empty |
+| `rejected` | Reviewed and rejected |
+| `superseded` | Replaced by another follow-up or artifact |
 
 ## Contributing
 
@@ -181,6 +249,8 @@ New fact → useful to another dev?
 | Inbox max count | 20 | `SHARED_MEMORY_INBOX_MAX_COUNT` |
 | Workspace max entries | 20 | `SHARED_MEMORY_WORKSPACE_MAX_COUNT` |
 | Auto-apply disable | — | `SHARED_MEMORY_ABSORB_AUTO_APPLY=0` |
+| Follow-up max age | 30 days | `SHARED_MEMORY_FOLLOWUP_MAX_AGE_DAYS` |
+| Require query index | no | `SHARED_MEMORY_REQUIRE_QUERY_INDEX=1` |
 
 ## License
 
