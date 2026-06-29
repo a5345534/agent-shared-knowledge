@@ -144,7 +144,8 @@ class TestPiLifecycleAdapter:
         assert "knowledge_compact_producer" in content
         assert "knowledge_absorb" in content
         assert "detached" in content
-        assert "modelRegistry" in content, "Extension should use Pi model registry"
+        assert "ctx.model" in content, "Extension should use the active conversation model"
+        assert "activeModel.baseUrl" in content, "Extension should inject model base URL"
         assert "getApiKeyAndHeaders" in content, "Extension should get API key from registry"
         assert "SHARED_KNOWLEDGE_LLM_API_KEY" in content, "Extension should inject API key env var"
         assert "childEnv" in content, "Extension should build child environment"

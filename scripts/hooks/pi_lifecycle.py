@@ -163,25 +163,29 @@ export default function (pi: ExtensionAPI) {{
       const contextJson = JSON.stringify(event.preparation?.messagesToSummarize ?? []);
       writeFileSync(tempFile, contextJson, "utf-8");
 
-      // --- Build environment: layer Pi model registry on top of process env ---
+      // --- Build environment: layer Pi's active model on top of process env ---
       const childEnv: Record<string, string | undefined> = {{
         ...(process.env as Record<string, string | undefined>),
       }};
 
-      // Look up the model from Pi's registry so the Python script inherits
-      // Pi's API key and model id without requiring duplicate env vars.
-      const modelId = childEnv["SHARED_KNOWLEDGE_LLM_MODEL"] ?? "gpt-4o";
-      const model = ctx.modelRegistry.find(undefined, modelId);
-      if (model) {{
-        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+      // Use the currently active conversation model to get API key,
+      // model id, and base URL — no need for the user to duplicate
+      // env vars that Pi already knows about.
+      const activeModel = ctx.model;
+      if (activeModel) {{
+        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(activeModel);
         if (auth.ok && auth.apiKey) {{
           childEnv["SHARED_KNOWLEDGE_LLM_API_KEY"] = auth.apiKey;
-          childEnv["SHARED_KNOWLEDGE_LLM_MODEL"] = model.id;
+          childEnv["SHARED_KNOWLEDGE_LLM_MODEL"] = activeModel.id;
+          // Inject base URL if the model has one (covers non-OpenAI endpoints)
+          if (activeModel.baseUrl) {{
+            childEnv["SHARED_KNOWLEDGE_LLM_BASE_URL"] = activeModel.baseUrl;
+          }}
         }}
       }}
-      // If registry lookup failed (e.g. model not found), fall back to
-      // whatever env vars the user already set (SHARED_KNOWLEDGE_LLM_API_KEY
-      // or OPENAI_API_KEY).
+      // If ctx.model is unavailable (should not happen in normal sessions),
+      // fall back to whatever env vars the user already set
+      // (SHARED_KNOWLEDGE_LLM_API_KEY or OPENAI_API_KEY).
 
       // --- Spawn producer in detached background process ---
       const child = spawn(
