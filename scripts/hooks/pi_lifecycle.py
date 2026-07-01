@@ -212,30 +212,77 @@ export default function (pi: ExtensionAPI) {
 
       let candidates: Record<string, unknown>[] = [];
       try { const p = JSON.parse(raw); candidates = Array.isArray(p.candidates) ? p.candidates : []; } catch {}
-      if (candidates.length === 0) {
-        ctx.ui.notify("Shared knowledge: no durable facts found", "info");
-        return;
-      }
+
+      // Build rich summary block
+      const summaryLines: string[] = [];
+      summaryLines.push("> [shared-knowledge]");
+      summaryLines.push(">");
+      summaryLines.push("> ### Shared-knowledge maintenance review");
+      summaryLines.push(">");
+      summaryLines.push("> Review source: " + model.provider + "/" + model.id);
+      summaryLines.push(">");
 
       const inbox = join(ctx.cwd, "knowledge", "inbox");
       mkdirSync(inbox, { recursive: true });
       const today = new Date().toISOString().slice(0, 10);
-      let written = 0;
+      const writtenFiles: string[] = [];
+      const skippedList: string[] = [];
 
-      for (const c of candidates) {
-        const errs = validateCandidate(c);
-        if (errs.length > 0) { console.warn("[sk-lifecycle] skip:", errs.join("; ")); continue; }
-        const cid = String(c.candidate_id ?? "").trim();
-        if (candidateExists(inbox, cid)) continue;
-        const dest = join(inbox, today + "-" + slugify(cid) + ".md");
-        writeFileSync(dest, renderCandidate(c), "utf-8");
-        written++;
+      if (candidates.length === 0) {
+        summaryLines.push("> No durable shared-knowledge facts found in this session.");
+        summaryLines.push(">");
+      } else {
+        for (const c of candidates) {
+          const errs = validateCandidate(c);
+          if (errs.length > 0) {
+            const cid = String(c.candidate_id ?? "unknown");
+            skippedList.push(cid + ": " + errs.join("; "));
+            continue;
+          }
+          const cid = String(c.candidate_id ?? "").trim();
+          if (candidateExists(inbox, cid)) {
+            skippedList.push(cid + ": duplicate");
+            continue;
+          }
+          const dest = join(inbox, today + "-" + slugify(cid) + ".md");
+          writeFileSync(dest, renderCandidate(c), "utf-8");
+          writtenFiles.push("knowledge/inbox/" + today + "-" + slugify(cid) + ".md");
+        }
+
+        if (writtenFiles.length > 0) {
+          summaryLines.push("> Auto-wrote " + writtenFiles.length + " shared-knowledge inbox candidate(s).");
+          summaryLines.push(">");
+          summaryLines.push("> ### Written inbox files");
+          summaryLines.push(">");
+          for (const f of writtenFiles) {
+            summaryLines.push("> - " + f);
+          }
+          summaryLines.push(">");
+        }
+
+        if (skippedList.length > 0) {
+          summaryLines.push("> Skipped:");
+          for (const s of skippedList) {
+            summaryLines.push("> - " + s);
+          }
+          summaryLines.push(">");
+        }
       }
 
-      ctx.ui.notify("Shared knowledge: " + written + " candidate(s) written to inbox", "info");
+      // Send rich summary to the session
+      pi.sendMessage({
+        customType: "shared-knowledge-review",
+        content: summaryLines.join("\n"),
+        display: true,
+      }, { triggerTurn: false });
+
     } catch (err) {
       console.error("[sk-lifecycle] Producer failed:", err);
-      ctx.ui.notify("Shared knowledge extraction failed", "error");
+      pi.sendMessage({
+        customType: "shared-knowledge-review",
+        content: "> [shared-knowledge]\n>\n> Shared-knowledge extraction failed: " + String(err),
+        display: true,
+      }, { triggerTurn: false });
     } finally {
       ctx.ui.setStatus("sk-producer", undefined);
     }
