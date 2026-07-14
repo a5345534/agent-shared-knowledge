@@ -119,6 +119,36 @@ class TestAbsorbRegression:
         assert "Important Fact" in content
         assert "type: feedback" in content
 
+    @pytest.mark.parametrize(
+        ("superseded_by", "expected"),
+        [
+            ("knowledge/facts/workspace/current.md", "knowledge/facts/workspace/current.md"),
+            ('["knowledge/facts/workspace/first.md", "knowledge/facts/workspace/second.md"]',
+             "knowledge/facts/workspace/first.md"),
+            ("['knowledge/facts/workspace/single-first.md', 'knowledge/facts/workspace/single-second.md']",
+             "knowledge/facts/workspace/single-first.md"),
+            (["knowledge/facts/workspace/list-first.md", "knowledge/facts/workspace/list-second.md"],
+             "knowledge/facts/workspace/list-first.md"),
+        ],
+    )
+    def test_render_curated_memory_normalizes_superseded_by(self, superseded_by, expected):
+        """Scalar and list-like superseded_by values render one normalized target."""
+        rendered = ka.render_curated_memory(
+            {
+                "name": "Replacement fact",
+                "description": "A replacement for an older shared fact.",
+                "type": "reference",
+                "source": "agent:test",
+                "superseded_by": superseded_by,
+            },
+            "This body is long enough to represent a curated shared fact.",
+            "workspace",
+        )
+
+        assert f'superseded_by: "{expected}"' in rendered
+        assert "list-second.md" not in rendered
+        assert "second.md" not in rendered
+
     def test_retain_memory_updates_workspace_index(self, workspace):
         """retain_memory updates MEMORY.md index for workspace scope."""
         inbox = _write_inbox_candidate(
@@ -272,6 +302,29 @@ class TestAbsorbCLIRegression:
         data = json.loads(stdout)
         assert "pressure" in data
         assert "triggered" in data
+
+    def test_hook_cli_when_pressure_is_triggered(self, workspace):
+        """Triggered hook planning accepts hook-specific backlog arguments."""
+        _write_inbox_candidate(
+            workspace,
+            "pressure.md",
+            suggested_action="keep_inbox",
+        )
+
+        rc, stdout, stderr = _run_absorb(
+            workspace,
+            "hook",
+            "--format",
+            "json",
+            "--inbox-max-count",
+            "0",
+            "--include-workspace-backlog",
+        )
+
+        assert rc == 0, stderr
+        data = json.loads(stdout)
+        assert data["triggered"] is True
+        assert data["apply"] is not None
 
     def test_missing_command(self, workspace):
         """Missing command exits with non-zero."""

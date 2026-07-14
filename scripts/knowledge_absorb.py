@@ -7,6 +7,7 @@ or CI/advisory job can call the same policy surface.
 from __future__ import annotations
 
 import argparse
+import ast
 import dataclasses
 import datetime as dt
 import json
@@ -771,11 +772,16 @@ def _parse_yaml_list(value: Any) -> list[str]:
         return []
     raw = value.strip()
     if raw.startswith("[") and raw.endswith("]"):
-        import json
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            return [raw]
+            try:
+                parsed = ast.literal_eval(raw)
+            except (SyntaxError, ValueError):
+                return [raw]
+        if isinstance(parsed, (list, tuple)):
+            return [str(item) for item in parsed]
+        return [raw]
     if raw.startswith("\"") or raw.startswith("'"):
         return [raw.strip("'\"")]
     return [raw]
@@ -808,7 +814,9 @@ def render_curated_memory(frontmatter: dict[str, Any], body: str, normalized_sco
             lines.append(f"  - {yaml_scalar(item)}")
     sb = frontmatter.get("superseded_by")
     if sb:
-        lines.append(f"superseded_by: {yaml_scalar(_parse_yaml_list(sb)[0] if isinstance(sb, str) and (sb.startswith(\"['\") or sb.startswith(\"[\")) else sb)}")
+        superseded_by = _parse_yaml_list(sb)
+        if superseded_by:
+            lines.append(f"superseded_by: {yaml_scalar(superseded_by[0])}")
     see_also = _parse_yaml_list(frontmatter.get("see_also", []))
     if see_also:
         lines.append("see_also:")
@@ -1127,7 +1135,12 @@ def run_hook(root: Path, args: argparse.Namespace) -> dict[str, Any]:
 
     # Run plan + apply directly in-place (worktree integration is
     # workspace-specific and should be configured by the adopter).
-    plan = build_plan(root, thresholds, "hook", args.include_workspace_backlog)
+    plan = build_plan(
+        root,
+        thresholds,
+        "hook",
+        getattr(args, "include_workspace_backlog", False),
+    )
     apply_result = apply_plan(root, plan, True)
     result["apply"] = dataclasses.asdict(apply_result)
 
@@ -1215,6 +1228,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     hook = subparsers.add_parser("hook", help="Run local hook pressure check and safe auto-apply")
     hook.add_argument("--format", choices=("text", "json"), default="text")
+    hook.add_argument("--include-workspace-backlog", action="store_true")
     hook.add_argument(
         "--rebuild-query-index",
         action="store_true",
