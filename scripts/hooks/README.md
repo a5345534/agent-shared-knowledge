@@ -42,17 +42,22 @@ order:
 ### Pi (`pi_lifecycle.py`) — Preferred
 
 Detects [Pi agent harness](https://github.com/earendil-works/pi-coding-agent)
-via `~/.pi/`. Installs a unified TypeScript extension at
-`<workspace>/.pi/extensions/shared-knowledge-lifecycle.ts` that handles both:
+via `~/.pi/`. For submodule installations it writes a thin loader at
+`<workspace>/.pi/extensions/shared-knowledge-lifecycle.ts` that references the
+canonical extension in the submodule. If project or global Pi settings already
+declare the package, duplicate loader installation is skipped.
 
-- **Producer** (via `session_before_compact`): Runs
-  `knowledge_compact_producer.py` to generate session-derived inbox
-  candidates before compaction.
-- **Absorber** (via `session_compact`): Runs `knowledge_absorb.py hook` to
-  absorb inbox candidates after compaction.
+- **Producer** (`session_before_compact`): Uses Pi's active model and provider
+  credentials to extract validated candidates. The default `review` mode
+  reports candidates without writing into the checkout.
+- **Materialization**: Explicit `inbox` mode writes candidates locally;
+  explicit `command` mode delegates JSON to an adopter-owned argv without a
+  shell.
+- **Absorber** (`session_compact`): Runs only after explicit inbox
+  materialization and invokes `knowledge_absorb.py hook --git-mode none`.
 
-Both stages run via `child_process.spawn()` with `detached: true` +
-`.unref()` to avoid blocking Pi's session.
+Only the optional absorber process is detached. Candidate extraction uses Pi's
+provider API and participates in the cancellable pre-compaction event.
 
 Global Pi scope is opt-in:
 
