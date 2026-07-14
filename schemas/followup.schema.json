@@ -26,12 +26,18 @@
     },
     "kind": {
       "type": "string",
-      "enum": ["skill_followup", "module_doc_followup"],
-      "description": "The type of downstream work this handoff targets."
+      "description": "The type of downstream work this handoff targets.",
+      "pattern": "^[a-z][a-z0-9_-]*$"
     },
     "status": {
       "type": "string",
-      "enum": ["open", "in_progress", "done", "rejected", "superseded"],
+      "enum": [
+        "open",
+        "in_progress",
+        "done",
+        "rejected",
+        "superseded"
+      ],
       "description": "Current lifecycle status of the follow-up task."
     },
     "createdAt": {
@@ -45,8 +51,8 @@
     },
     "sourceAction": {
       "type": "string",
-      "enum": ["promote_to_skill", "promote_to_module_doc"],
-      "description": "The absorption action that triggered this follow-up."
+      "description": "The absorption action that triggered this follow-up.",
+      "pattern": "^promote_to_[a-z][a-z0-9_-]*$"
     },
     "suggestedDestination": {
       "type": "string",
@@ -62,7 +68,9 @@
     },
     "evidence": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Evidence snippets from the original candidate supporting the classification."
     },
     "confidence": {
@@ -77,22 +85,31 @@
     },
     "handoffTo": {
       "type": "string",
-      "enum": ["skill-creator", "doc-writer"],
-      "description": "The downstream agent role responsible for completing this follow-up."
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "description": "The configured downstream authority responsible for completing this follow-up."
     },
     "recommendedOutputs": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Recommended output paths or deliverables for the downstream agent."
     },
     "outputs": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["path", "description"],
+        "required": [
+          "path",
+          "description"
+        ],
         "properties": {
-          "path": { "type": "string" },
-          "description": { "type": "string" }
+          "path": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
         }
       },
       "description": "Completed output artifacts produced by the downstream agent."

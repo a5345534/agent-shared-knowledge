@@ -602,13 +602,14 @@ def check_markdown_links(root: Path, files: Iterable[Path], check_id: str, surfa
                 )
 
 
-def workspace_guidance_files(root: Path) -> list[Path]:
+def workspace_guidance_files(root: Path, include_adopter_topology: bool = False) -> list[Path]:
     files = []
     agents = root / "AGENTS.md"
     if agents.exists():
         files.append(agents)
     files.extend(iter_files(root / "docs", (".md",)))
-    files.extend(iter_files(root / "agent-workspace", (".md", ".json")))
+    if include_adopter_topology:
+        files.extend(iter_files(root / "agent-workspace", (".md", ".json")))
     return files
 
 
@@ -801,6 +802,17 @@ FOLLOWUP_STATUSES = {"open", "in_progress", "done", "rejected", "superseded"}
 FOLLOWUP_SOURCE_ACTIONS = {"promote_to_skill", "promote_to_module_doc"}
 FOLLOWUP_HANDOFFS = {"skill-creator", "doc-writer"}
 
+
+def configured_followup_contract() -> tuple[set[str], set[str], set[str]]:
+    from knowledge_absorb import followup_authorities
+    authorities = followup_authorities().values()
+    return (
+        FOLLOWUP_KINDS | {item["kind"] for item in authorities},
+        FOLLOWUP_SOURCE_ACTIONS | set(followup_authorities()),
+        FOLLOWUP_HANDOFFS | {item["handoff"] for item in authorities},
+    )
+
+
 FOLLOWUP_REQUIRED_FIELDS = [
     "version",
     "kind",
@@ -976,12 +988,13 @@ def check_required_fields(data: dict[str, Any], art_path: str) -> list[LintIssue
 def check_kind(data: dict[str, Any], art_path: str) -> list[LintIssue]:
     """Validate the 'kind' field against known follow-up kinds."""
     kind = data.get("kind")
-    if kind is not None and kind not in FOLLOWUP_KINDS:
+    kinds, _, _ = configured_followup_contract()
+    if kind is not None and kind not in kinds:
         return [LintIssue(
             level="error",
             code="followup-kind-valid",
             path=art_path,
-            detail=f"Invalid kind '{kind}'. Must be one of: {', '.join(sorted(FOLLOWUP_KINDS))}",
+            detail=f"Invalid kind '{kind}'. Must be one of: {', '.join(sorted(kinds))}",
         )]
     return []
 
@@ -1004,12 +1017,13 @@ def check_source_action(data: dict[str, Any], art_path: str) -> list[LintIssue]:
     if "sourceAction" not in data or data["sourceAction"] is None:
         return []  # handled by required fields check
     action = data["sourceAction"]
-    if action not in FOLLOWUP_SOURCE_ACTIONS:
+    _, actions, _ = configured_followup_contract()
+    if action not in actions:
         return [LintIssue(
             level="error",
             code="followup-source-action-valid",
             path=art_path,
-            detail=f"Invalid sourceAction '{action}'. Must be one of: {', '.join(sorted(FOLLOWUP_SOURCE_ACTIONS))}",
+            detail=f"Invalid sourceAction '{action}'. Must be one of: {', '.join(sorted(actions))}",
         )]
     return []
 
@@ -1019,12 +1033,13 @@ def check_handoff_to(data: dict[str, Any], art_path: str) -> list[LintIssue]:
     if "handoffTo" not in data or data["handoffTo"] is None:
         return []  # handled by required fields check
     handoff = data["handoffTo"]
-    if handoff not in FOLLOWUP_HANDOFFS:
+    _, _, handoffs = configured_followup_contract()
+    if handoff not in handoffs:
         return [LintIssue(
             level="error",
             code="followup-handoff-valid",
             path=art_path,
-            detail=f"Invalid handoffTo '{handoff}'. Must be one of: {', '.join(sorted(FOLLOWUP_HANDOFFS))}",
+            detail=f"Invalid handoffTo '{handoff}'. Must be one of: {', '.join(sorted(handoffs))}",
         )]
     return []
 
@@ -1598,10 +1613,12 @@ def main() -> int:
     findings: list[Finding] = []
     fixes: dict[Path, str] = {}
 
+    adopter_topology = os.environ.get("SHARED_KNOWLEDGE_ADOPTER_TOPOLOGY_LINT") == "1"
     check_shared_memory(root, findings, fixes, args.staleness_threshold)
     check_content_overlap(root, findings)
-    check_module_map(root, findings)
-    check_markdown_links(root, workspace_guidance_files(root), "guidance-path-broken", "workspace-guidance", findings)
+    if adopter_topology:
+        check_module_map(root, findings)
+    check_markdown_links(root, workspace_guidance_files(root, adopter_topology), "guidance-path-broken", "workspace-guidance", findings)
     check_knowledge_viewport(root, findings)
     check_followup_artifacts(root, findings, args.followup_max_age_days)
     if args.check_query_index:

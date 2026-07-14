@@ -63,6 +63,36 @@ ACTION_TO_HANDOFF: dict[str, str] = {
 }
 FOLLOWUP_STATUSES = {"open", "in_progress", "done", "rejected", "superseded"}
 FOLLOWUP_PROMOTE_ACTIONS = {"promote_to_skill", "promote_to_module_doc"}
+AUTHORITY_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
+def followup_authorities() -> dict[str, dict[str, str]]:
+    authorities = {
+        action: {
+            "kind": ACTION_TO_FOLLOWUP_KIND[action],
+            "directory": FOLLOWUP_KIND_TO_DIR[ACTION_TO_FOLLOWUP_KIND[action]],
+            "handoff": ACTION_TO_HANDOFF[action],
+            "destination": "agent-workspace/skills/<skill>/" if action == "promote_to_skill" else "<module>/docs/{architecture,operations,runbooks}/",
+        }
+        for action in FOLLOWUP_PROMOTE_ACTIONS
+    }
+    raw = os.environ.get("SHARED_KNOWLEDGE_FOLLOWUP_AUTHORITIES")
+    if not raw:
+        return authorities
+    try:
+        configured = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid SHARED_KNOWLEDGE_FOLLOWUP_AUTHORITIES JSON: {exc}") from exc
+    if not isinstance(configured, list):
+        raise ValueError("SHARED_KNOWLEDGE_FOLLOWUP_AUTHORITIES must be a JSON array")
+    for item in configured:
+        required = ("action", "kind", "directory", "handoff", "destination")
+        if not isinstance(item, dict) or any(not isinstance(item.get(key), str) or not item[key] for key in required):
+            raise ValueError(f"Authority entries require non-empty fields: {', '.join(required)}")
+        if any(not AUTHORITY_RE.fullmatch(item[key]) for key in ("action", "kind", "directory", "handoff")):
+            raise ValueError("Authority action/kind/directory/handoff must use safe identifiers")
+        authorities[item["action"]] = {key: item[key] for key in required if key != "action"}
+    return authorities
 
 
 @dataclasses.dataclass
@@ -458,7 +488,7 @@ def classify_candidate(root: Path, path: Path) -> PlanAction:
     lowered = combined.lower()
     evidence = evidence_list(frontmatter, body)
     suggested = clean_line(frontmatter.get("suggested_action"), 80)
-    action = suggested if suggested in ACTION_VALUES else ""
+    action = suggested if suggested in ACTION_VALUES or suggested in followup_authorities() else ""
 
     # If dedup found medium-similarity, override to keep_inbox
     if dedup_result and dedup_result["action"] == "keep_inbox":
@@ -529,11 +559,8 @@ def classify_candidate(root: Path, path: Path) -> PlanAction:
 def suggested_destination_for_followup(action: str, frontmatter: dict[str, Any]) -> str | None:
     if frontmatter.get("destination"):
         return str(frontmatter["destination"])
-    if action == "promote_to_module_doc":
-        return "<module>/docs/{architecture,operations,runbooks}/"
-    if action == "promote_to_skill":
-        return "agent-workspace/skills/<skill>/"
-    return None
+    authority = followup_authorities().get(action)
+    return authority["destination"] if authority else None
 
 
 def get_candidate_id(frontmatter: dict[str, Any], source_path: Path) -> str:
@@ -545,11 +572,15 @@ def get_candidate_id(frontmatter: dict[str, Any], source_path: Path) -> str:
 
 
 def followup_kind_for_action(action: str) -> str | None:
-    return ACTION_TO_FOLLOWUP_KIND.get(action)
+    authority = followup_authorities().get(action)
+    return authority["kind"] if authority else None
 
 
 def followup_dir_for_kind(kind: str) -> str | None:
-    return FOLLOWUP_KIND_TO_DIR.get(kind)
+    for authority in followup_authorities().values():
+        if authority["kind"] == kind:
+            return authority["directory"]
+    return None
 
 
 def followup_files(root: Path, kind: str) -> list[Path]:
@@ -632,7 +663,8 @@ def render_followup_artifact(
 ) -> dict[str, Any]:
     """Build the follow-up artifact JSON dict."""
     kind = followup_kind_for_action(source_action) or "skill_followup"
-    handoff_to = ACTION_TO_HANDOFF.get(source_action, "skill-creator")
+    authority = followup_authorities().get(source_action)
+    handoff_to = authority["handoff"] if authority else "skill-creator"
     name = clean_line(frontmatter.get("name"), 80) or "Untitled follow-up"
     description = clean_line(frontmatter.get("description"), 180) or "Follow-up from absorption pipeline."
     title = f"{name}: {description}"[:200].strip(": ").strip()
@@ -1011,7 +1043,7 @@ def apply_plan(root: Path, plan: dict[str, Any], safe_only: bool) -> ApplyResult
         candidate_path = action.get("candidatePath", "")
 
         # Follow-up artifact creation for promote actions (safe mechanical action)
-        if action_name in FOLLOWUP_PROMOTE_ACTIONS:
+        if action_name in followup_authorities():
             followup_result = apply_followup_artifact(root, action)
             if followup_result.get("existing"):
                 follow_ups.append(
@@ -1058,7 +1090,7 @@ def apply_followup_artifact(root: Path, action: dict[str, Any]) -> dict[str, Any
     """
     candidate_path_str = action.get("candidatePath", "")
     action_name = action.get("action", "")
-    if not candidate_path_str or action_name not in FOLLOWUP_PROMOTE_ACTIONS:
+    if not candidate_path_str or action_name not in followup_authorities():
         return {"error": f"Invalid action for followup: {action_name}"}
 
     source_path = root / candidate_path_str
