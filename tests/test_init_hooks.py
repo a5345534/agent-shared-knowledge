@@ -168,6 +168,27 @@ class TestPiLifecycleAdapter:
         assert "duplicate install skipped" in result["message"]
         assert not (root / ".pi" / "extensions" / "shared-knowledge-lifecycle.ts").exists()
 
+    def test_install_skips_duplicate_when_pi_package_is_global(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "ws"
+        root.mkdir()
+        self._write_agents_md(root)
+        fake_home = tmp_path / "home"
+        settings = fake_home / ".pi" / "agent" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            '{"packages":[{"source":"git:github.com/a5345534/agent-shared-knowledge@main"}]}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        result = pi_lifecycle.install(root)
+
+        assert result["status"] == "skipped"
+        assert "duplicate install skipped" in result["message"]
+        assert not (root / ".pi" / "extensions" / "shared-knowledge-lifecycle.ts").exists()
+
     def test_install_skipped_when_no_pi(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Adapter returns 'skipped' when ~/.pi/ does not exist."""
         fake_home = tmp_path / "home"

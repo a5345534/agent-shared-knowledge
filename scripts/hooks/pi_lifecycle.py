@@ -46,18 +46,22 @@ def install(root: Path, scope: str = "workspace", legacy_hook: bool = False) -> 
 
 
 def _pi_package_declared(root: Path) -> bool:
-    settings_path = root.resolve() / ".pi" / "settings.json"
-    if not settings_path.is_file():
-        return False
-    try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return False
-    packages = settings.get("packages", [])
-    for package in packages if isinstance(packages, list) else []:
-        source = package if isinstance(package, str) else package.get("source", "") if isinstance(package, dict) else ""
-        if PACKAGE_SOURCE in source:
-            return True
+    settings_paths = [
+        root.resolve() / ".pi" / "settings.json",
+        Path.home() / ".pi" / "agent" / "settings.json",
+    ]
+    for settings_path in settings_paths:
+        if not settings_path.is_file():
+            continue
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        packages = settings.get("packages", [])
+        for package in packages if isinstance(packages, list) else []:
+            source = package if isinstance(package, str) else package.get("source", "") if isinstance(package, dict) else ""
+            if PACKAGE_SOURCE in source:
+                return True
     return False
 
 

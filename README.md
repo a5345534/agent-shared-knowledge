@@ -112,8 +112,8 @@ knowledge-absorb --root . hook --git-mode commit  # explicit legacy commit behav
 ```
 
 Use either the Pi Package extension or the submodule-generated loader, not both.
-`knowledge-query init` skips loader installation when the project Pi settings
-already declare the `agent-shared-knowledge` package.
+`knowledge-query init` skips loader installation when project or global Pi
+settings already declare the `agent-shared-knowledge` package.
 
 **Version pinning:**
 
