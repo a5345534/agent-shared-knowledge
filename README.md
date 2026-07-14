@@ -313,6 +313,47 @@ The safe default does not materialize, stage, or commit repository files. See
 a worktree/PR materializer. The optional inbox absorber is detached so it does
 not block the session, but it never performs Git integration automatically.
 
+## Migrating `shared-memory-v1`
+
+Use the explicit migration command; `init` never guesses or moves a legacy tree:
+
+```bash
+knowledge-query --root . migrate-layout --from shared-memory-v1 --dry-run
+knowledge-query --root . migrate-layout --from shared-memory-v1
+```
+
+The command maps workspace/module/capability facts and inbox candidates to the
+current layout, rewrites the B1 path once, verifies SHA-256 parity, and only then
+removes verified source files. Unknown paths or differing destination content
+block migration without source cleanup.
+
+## Adopter policy and follow-up authorities
+
+Generic lint excludes adopter-specific `projects/backend`, `module-map`, and
+`agent-workspace` topology by default. Existing topology checks are opt-in:
+
+```bash
+SHARED_KNOWLEDGE_ADOPTER_TOPOLOGY_LINT=1 knowledge-lint --root .
+```
+
+Additional promotion authorities are a JSON array in
+`SHARED_KNOWLEDGE_FOLLOWUP_AUTHORITIES`. OpenSpec remains optional:
+
+```bash
+export SHARED_KNOWLEDGE_FOLLOWUP_AUTHORITIES='[{"action":"promote_to_openspec","kind":"openspec_followup","directory":"openspec","handoff":"openspec-author","destination":"openspec/changes/<change>/"}]'
+```
+
+Malformed configuration fails closed. Built-in skill and module-doc authorities
+remain available without configuration.
+
+## Distribution source of truth
+
+For Pi, Codex, OpenCode, and CI sharing one policy/scripts revision, pin this
+repository as a Git submodule. The Pi Package is an optional Pi integration
+surface and references the same canonical lifecycle implementation; do not
+install a second generated lifecycle extension. Release `v0.1.0` is gated by
+`npm run release:smoke` from a clean checkout.
+
 ## Contributing
 
 ### Writing a new entry

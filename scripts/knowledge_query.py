@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -2008,6 +2009,95 @@ def _init_install_hook(root: Path, dry_run: bool = False, hook_scope: str = "wor
     return result
 
 
+def _file_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _legacy_migration_plan(root: Path) -> dict[str, Any]:
+    legacy = root / "knowledge" / "shared-memory"
+    mappings = {
+        "workspace": root / "knowledge" / "facts" / "workspace",
+        "module": root / "knowledge" / "facts" / "module",
+        "capability": root / "knowledge" / "facts" / "capability",
+        "inbox": root / "knowledge" / "inbox",
+    }
+    files: list[dict[str, str]] = []
+    unknown: list[str] = []
+    collisions: list[str] = []
+    if not legacy.is_dir():
+        return {"source": str(legacy), "files": [], "unknown": [], "collisions": [], "error": "legacy layout not found"}
+    for source in sorted(path for path in legacy.rglob("*") if path.is_file()):
+        relative = source.relative_to(legacy)
+        if relative.as_posix() == "MEMORY.md":
+            destination = mappings["workspace"] / "MEMORY.md"
+        elif relative.parts and relative.parts[0] in mappings:
+            destination = mappings[relative.parts[0]].joinpath(*relative.parts[1:])
+        else:
+            unknown.append(relative.as_posix())
+            continue
+        digest = _file_hash(source)
+        if destination.exists() and _file_hash(destination) != digest:
+            collisions.append(destination.relative_to(root).as_posix())
+        files.append({
+            "source": source.relative_to(root).as_posix(),
+            "destination": destination.relative_to(root).as_posix(),
+            "sha256": digest,
+        })
+    return {"source": str(legacy), "files": files, "unknown": unknown, "collisions": collisions}
+
+
+def cmd_migrate_layout(root: Path, args: argparse.Namespace) -> int:
+    plan = _legacy_migration_plan(root)
+    plan["from"] = args.from_layout
+    plan["dryRun"] = bool(args.dry_run)
+    if plan.get("error") or plan["unknown"] or plan["collisions"]:
+        plan["status"] = "blocked"
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        return 1
+    if args.dry_run:
+        plan["status"] = "ready"
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        return 0
+
+    for item in plan["files"]:
+        source, destination = root / item["source"], root / item["destination"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not destination.exists():
+            shutil.copy2(source, destination)
+        if _file_hash(destination) != item["sha256"]:
+            plan["status"] = "parity_failed"
+            print(json.dumps(plan, ensure_ascii=False, indent=2))
+            return 1
+
+    agents = root / "AGENTS.md"
+    if agents.exists():
+        text = agents.read_text(encoding="utf-8")
+        text = text.replace("knowledge/shared-memory/MEMORY.md", "knowledge/facts/workspace/MEMORY.md")
+        sentinel = "<!-- shared-knowledge B1 -->"
+        if sentinel not in text:
+            text = re.sub(r"(?m)^(##+\s+(?:Workspace\s+)?Shared (?:Memory|Knowledge)\s*)$", sentinel + r"\n\1", text, count=1)
+        agents.write_text(text, encoding="utf-8")
+
+    for item in plan["files"]:
+        source = root / item["source"]
+        if source.exists() and _file_hash(root / item["destination"]) == item["sha256"]:
+            source.unlink()
+    legacy = root / "knowledge" / "shared-memory"
+    for directory in sorted((path for path in legacy.rglob("*") if path.is_dir()), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    try:
+        legacy.rmdir()
+    except OSError:
+        pass
+    plan["status"] = "migrated"
+    plan["verifiedCount"] = len(plan["files"])
+    print(json.dumps(plan, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_init(root: Path, args: argparse.Namespace | None = None) -> int:
     """Run the init subcommand: bootstrap the shared-knowledge workspace.
 
@@ -2284,6 +2374,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Task type for ranking boost (not a hard filter)",
     )
 
+    migrate_parser = subparsers.add_parser(
+        "migrate-layout",
+        help="Migrate a recognized legacy knowledge layout",
+    )
+    migrate_parser.add_argument("--from", dest="from_layout", choices=("shared-memory-v1",), required=True)
+    migrate_parser.add_argument("--dry-run", action="store_true")
+
     # init
     init_parser = subparsers.add_parser(
         "init",
@@ -2335,6 +2432,8 @@ def main() -> int:
         return cmd_inject(root, args)
     elif args.command == "explain":
         return cmd_explain(root, args)
+    elif args.command == "migrate-layout":
+        return cmd_migrate_layout(root, args)
     elif args.command == "init":
         return cmd_init(root, args)
     else:
