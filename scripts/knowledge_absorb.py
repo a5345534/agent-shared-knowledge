@@ -1126,6 +1126,7 @@ def run_hook(root: Path, args: argparse.Namespace) -> dict[str, Any]:
         "pressure": dataclasses.asdict(pressure),
         "triggered": pressure.triggered,
         "autoApplyEnabled": os.environ.get("SHARED_MEMORY_ABSORB_AUTO_APPLY") != "0",
+        "gitMode": args.git_mode,
         "worktree": None,
         "commit": None,
         "apply": None,
@@ -1145,7 +1146,7 @@ def run_hook(root: Path, args: argparse.Namespace) -> dict[str, Any]:
     result["apply"] = dataclasses.asdict(apply_result)
 
     changed_paths = apply_result.changedPaths
-    if not changed_paths:
+    if not changed_paths or args.git_mode == "none":
         return result
 
     add = run(["git", "add", "-A", *changed_paths], cwd=root, timeout=30)
@@ -1229,6 +1230,12 @@ def build_parser() -> argparse.ArgumentParser:
     hook = subparsers.add_parser("hook", help="Run local hook pressure check and safe auto-apply")
     hook.add_argument("--format", choices=("text", "json"), default="text")
     hook.add_argument("--include-workspace-backlog", action="store_true")
+    hook.add_argument(
+        "--git-mode",
+        choices=("none", "commit"),
+        default="commit",
+        help="Git integration policy after applying actions (default: commit)",
+    )
     hook.add_argument(
         "--rebuild-query-index",
         action="store_true",
