@@ -125,6 +125,8 @@ class TestAbsorbRegression:
             ("knowledge/facts/workspace/current.md", "knowledge/facts/workspace/current.md"),
             ('["knowledge/facts/workspace/first.md", "knowledge/facts/workspace/second.md"]',
              "knowledge/facts/workspace/first.md"),
+            ("['knowledge/facts/workspace/single-first.md', 'knowledge/facts/workspace/single-second.md']",
+             "knowledge/facts/workspace/single-first.md"),
             (["knowledge/facts/workspace/list-first.md", "knowledge/facts/workspace/list-second.md"],
              "knowledge/facts/workspace/list-first.md"),
         ],

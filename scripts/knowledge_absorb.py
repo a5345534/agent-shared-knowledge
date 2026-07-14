@@ -7,6 +7,7 @@ or CI/advisory job can call the same policy surface.
 from __future__ import annotations
 
 import argparse
+import ast
 import dataclasses
 import datetime as dt
 import json
@@ -771,11 +772,16 @@ def _parse_yaml_list(value: Any) -> list[str]:
         return []
     raw = value.strip()
     if raw.startswith("[") and raw.endswith("]"):
-        import json
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            return [raw]
+            try:
+                parsed = ast.literal_eval(raw)
+            except (SyntaxError, ValueError):
+                return [raw]
+        if isinstance(parsed, (list, tuple)):
+            return [str(item) for item in parsed]
+        return [raw]
     if raw.startswith("\"") or raw.startswith("'"):
         return [raw.strip("'\"")]
     return [raw]
