@@ -61,6 +61,43 @@ python3 shared-knowledge/scripts/knowledge_query.py --root . init --hook-scope g
 python3 shared-knowledge/scripts/knowledge_lint.py --root .
 ```
 
+## Alternate Install: Pi Package
+
+This repo is also a [Pi Package](https://github.com/earendil-works/pi) —
+installable into any workspace with a single command. The extension, prompts,
+and CLI tools are loaded automatically.
+
+```bash
+# 1. Install into workspace (project-local)
+pi install -l git:github.com/a5345534/agent-shared-knowledge@main
+pi update --extensions
+
+# 2. Build the query index (one-time per workspace)
+# The CLI tools are on PATH via pi install
+knowledge-query --root . rebuild-index
+
+# 3. Run absorption / lint via CLI wrappers
+knowledge-absorb --root . plan
+knowledge-lint --root .
+```
+
+> **Tip:** The Pi Package install automatically loads the `shared-knowledge-lifecycle`
+> extension which generates inbox candidates during session compaction and runs
+> the absorber. The `knowledge-absorb`, `knowledge-lint`, and `knowledge-query`
+> commands are available globally via the `bin/` wrappers.
+
+**Version pinning:**
+
+```bash
+pi install -l git:github.com/a5345534/agent-shared-knowledge@v0.1.0
+```
+
+**Update:**
+
+```bash
+pi update --extension git:github.com/a5345534/agent-shared-knowledge
+```
+
 ## Directory Structure
 
 ```
