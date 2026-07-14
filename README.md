@@ -118,7 +118,7 @@ settings already declare the `agent-shared-knowledge` package.
 **Version pinning:**
 
 ```bash
-pi install -l git:github.com/a5345534/agent-shared-knowledge@v0.1.0
+pi install -l git:github.com/a5345534/agent-shared-knowledge@v0.1.1
 ```
 
 **Update:**
@@ -351,7 +351,7 @@ remain available without configuration.
 For Pi, Codex, OpenCode, and CI sharing one policy/scripts revision, pin this
 repository as a Git submodule. The Pi Package is an optional Pi integration
 surface and references the same canonical lifecycle implementation; do not
-install a second generated lifecycle extension. Release `v0.1.0` is gated by
+install a second generated lifecycle extension. Release `v0.1.1` is gated by
 `npm run release:smoke` from a clean checkout.
 
 ## Contributing

@@ -2030,6 +2030,8 @@ def _legacy_migration_plan(root: Path) -> dict[str, Any]:
         relative = source.relative_to(legacy)
         if relative.as_posix() == "MEMORY.md":
             destination = mappings["workspace"] / "MEMORY.md"
+        elif relative.as_posix() == "README.md":
+            destination = root / "knowledge" / "facts" / "README.md"
         elif relative.parts and relative.parts[0] in mappings:
             destination = mappings[relative.parts[0]].joinpath(*relative.parts[1:])
         else:
@@ -2046,38 +2048,108 @@ def _legacy_migration_plan(root: Path) -> dict[str, Any]:
     return {"source": str(legacy), "files": files, "unknown": unknown, "collisions": collisions}
 
 
+LEGACY_B1_SENTINEL = "<!-- shared-knowledge B1 -->"
+LEGACY_B1_HEADING_RE = re.compile(
+    r"(?ms)^##\s+(?:Workspace\s+)?Shared (?:Memory|Knowledge)\s*\n.*?(?=^##\s+|\Z)"
+)
+LEGACY_B1_PATH_RE = re.compile(r"knowledge/shared-memory/[A-Za-z0-9_./<>-]*")
+
+
+def _map_legacy_knowledge_path(path: str) -> str | None:
+    prefix = "knowledge/shared-memory/"
+    if not path.startswith(prefix):
+        return None
+    relative = path[len(prefix):]
+    if relative == "MEMORY.md":
+        return "knowledge/facts/workspace/MEMORY.md"
+    if relative == "README.md":
+        return "knowledge/facts/README.md"
+    if relative == "":
+        return "knowledge/facts/"
+    mappings = {
+        "workspace/": "knowledge/facts/workspace/",
+        "module/": "knowledge/facts/module/",
+        "capability/": "knowledge/facts/capability/",
+        "inbox/": "knowledge/inbox/",
+    }
+    for old_prefix, new_prefix in mappings.items():
+        if relative.startswith(old_prefix):
+            return new_prefix + relative[len(old_prefix):]
+    return None
+
+
+def _active_b1_blocks(text: str) -> list[re.Match[str]]:
+    return list(LEGACY_B1_HEADING_RE.finditer(text))
+
+
+def _legacy_b1_rewrite_plan(text: str) -> list[dict[str, str]]:
+    rewrites: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in _active_b1_blocks(text):
+        for old_path in LEGACY_B1_PATH_RE.findall(match.group(0)):
+            new_path = _map_legacy_knowledge_path(old_path)
+            if new_path and (old_path, new_path) not in seen:
+                seen.add((old_path, new_path))
+                rewrites.append({"source": old_path, "destination": new_path})
+    return rewrites
+
+
 def _rewrite_legacy_b1(text: str) -> str:
-    old_path = "knowledge/shared-memory/MEMORY.md"
-    new_path = "knowledge/facts/workspace/MEMORY.md"
-    text = text.replace(old_path, new_path)
-    sentinel = "<!-- shared-knowledge B1 -->"
-    heading_re = re.compile(
-        r"(?ms)^##\s+(?:Workspace\s+)?Shared (?:Memory|Knowledge)\s*\n.*?(?=^##\s+|\Z)"
-    )
-    blocks = list(heading_re.finditer(text))
-    if sentinel not in text:
-        return re.sub(
-            r"(?m)^(##\s+(?:Workspace\s+)?Shared (?:Memory|Knowledge)\s*)$",
-            sentinel + r"\n\1",
-            text,
-            count=1,
+    """Rewrite legacy links only in recognized active B1 sections."""
+    blocks = _active_b1_blocks(text)
+    if not blocks:
+        return text
+
+    canonical_index = 0
+    for index, match in enumerate(blocks):
+        prefix = text[max(0, match.start() - len(LEGACY_B1_SENTINEL) - 2):match.start()]
+        if LEGACY_B1_SENTINEL in prefix:
+            canonical_index = index
+            break
+
+    replacements: list[tuple[int, int, str]] = []
+    for index, match in enumerate(blocks):
+        block = match.group(0)
+        rewritten = LEGACY_B1_PATH_RE.sub(
+            lambda path_match: _map_legacy_knowledge_path(path_match.group(0)) or path_match.group(0),
+            block,
         )
-    kept = False
-    for match in reversed(blocks):
-        prefix = text[max(0, match.start() - len(sentinel) - 2):match.start()]
-        is_canonical = sentinel in prefix
-        if is_canonical and not kept:
-            kept = True
-            continue
-        if new_path in match.group(0):
-            text = text[:match.start()] + text[match.end():]
+        # Remove only recognized duplicate index-bearing active sections.
+        if index != canonical_index and "knowledge/facts/workspace/MEMORY.md" in rewritten:
+            replacement = ""
+        else:
+            replacement = rewritten
+            if index == canonical_index:
+                prefix = text[max(0, match.start() - len(LEGACY_B1_SENTINEL) - 2):match.start()]
+                if LEGACY_B1_SENTINEL not in prefix:
+                    replacement = LEGACY_B1_SENTINEL + "\n" + replacement
+        replacements.append((match.start(), match.end(), replacement))
+
+    for start, end, replacement in reversed(replacements):
+        text = text[:start] + replacement + text[end:]
     return text
+
+
+def _validate_rewritten_b1(root: Path, text: str, rewrites: list[dict[str, str]]) -> dict[str, list[str]]:
+    active_text = "\n".join(match.group(0) for match in _active_b1_blocks(text))
+    legacy_refs = sorted(set(LEGACY_B1_PATH_RE.findall(active_text)))
+    missing_destinations = sorted({
+        item["destination"]
+        for item in rewrites
+        if "<" not in item["destination"]
+        and ">" not in item["destination"]
+        and not (root / item["destination"]).exists()
+    })
+    return {"legacyRefs": legacy_refs, "missingDestinations": missing_destinations}
 
 
 def cmd_migrate_layout(root: Path, args: argparse.Namespace) -> int:
     plan = _legacy_migration_plan(root)
     plan["from"] = args.from_layout
     plan["dryRun"] = bool(args.dry_run)
+    agents = root / "AGENTS.md"
+    agents_text = agents.read_text(encoding="utf-8") if agents.exists() else ""
+    plan["b1Rewrites"] = _legacy_b1_rewrite_plan(agents_text)
     if plan.get("error") or plan["unknown"] or plan["collisions"]:
         plan["status"] = "blocked"
         print(json.dumps(plan, ensure_ascii=False, indent=2))
@@ -2097,9 +2169,15 @@ def cmd_migrate_layout(root: Path, args: argparse.Namespace) -> int:
             print(json.dumps(plan, ensure_ascii=False, indent=2))
             return 1
 
-    agents = root / "AGENTS.md"
+    rewritten_agents = _rewrite_legacy_b1(agents_text) if agents.exists() else agents_text
+    b1_validation = _validate_rewritten_b1(root, rewritten_agents, plan["b1Rewrites"])
+    plan["b1Validation"] = b1_validation
+    if b1_validation["legacyRefs"] or b1_validation["missingDestinations"]:
+        plan["status"] = "b1_validation_failed"
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        return 1
     if agents.exists():
-        agents.write_text(_rewrite_legacy_b1(agents.read_text(encoding="utf-8")), encoding="utf-8")
+        agents.write_text(rewritten_agents, encoding="utf-8")
 
     for item in plan["files"]:
         source = root / item["source"]
