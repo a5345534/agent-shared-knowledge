@@ -518,7 +518,13 @@ def classify_candidate(root: Path, path: Path) -> PlanAction:
         else:
             action = "retain_memory"
 
-    scope, destination = destination_for_candidate(frontmatter)
+    scope, facts_destination = destination_for_candidate(frontmatter)
+    is_followup_action = action in followup_authorities()
+    destination = (
+        suggested_destination_for_followup(action, frontmatter)
+        if is_followup_action
+        else facts_destination
+    )
     name = clean_line(frontmatter.get("name"), 80)
     description = clean_line(frontmatter.get("description"), 180)
     memory_type = clean_line(frontmatter.get("type") or "feedback", 80)
@@ -531,7 +537,6 @@ def classify_candidate(root: Path, path: Path) -> PlanAction:
         reason = "Deterministic inbox classifier selected this action from candidate metadata and body text."
     if action != "retain_memory":
         safe = False
-        destination = destination or suggested_destination_for_followup(action, frontmatter)
     if action == "retain_memory" and not safe:
         action = "keep_inbox"
         destination = None

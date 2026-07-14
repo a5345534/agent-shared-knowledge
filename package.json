@@ -1,9 +1,14 @@
 {
   "name": "agent-shared-knowledge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Workspace-level shared fact storage layer for cross-agent, cross-platform collaboration",
   "type": "module",
-  "keywords": ["pi-package", "shared-memory", "knowledge", "agent"],
+  "keywords": [
+    "pi-package",
+    "shared-memory",
+    "knowledge",
+    "agent"
+  ],
   "bin": {
     "knowledge-absorb": "./bin/knowledge-absorb",
     "knowledge-lint": "./bin/knowledge-lint",
@@ -35,8 +40,12 @@
     "release:smoke": "python3 scripts/release_smoke.py"
   },
   "pi": {
-    "extensions": [".pi/extensions/**/*.ts"],
-    "prompts": [".pi/prompts/*.md"]
+    "extensions": [
+      ".pi/extensions/**/*.ts"
+    ],
+    "prompts": [
+      ".pi/prompts/*.md"
+    ]
   },
   "engines": {
     "node": ">=20"
