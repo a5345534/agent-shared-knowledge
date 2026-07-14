@@ -2046,6 +2046,34 @@ def _legacy_migration_plan(root: Path) -> dict[str, Any]:
     return {"source": str(legacy), "files": files, "unknown": unknown, "collisions": collisions}
 
 
+def _rewrite_legacy_b1(text: str) -> str:
+    old_path = "knowledge/shared-memory/MEMORY.md"
+    new_path = "knowledge/facts/workspace/MEMORY.md"
+    text = text.replace(old_path, new_path)
+    sentinel = "<!-- shared-knowledge B1 -->"
+    heading_re = re.compile(
+        r"(?ms)^##\s+(?:Workspace\s+)?Shared (?:Memory|Knowledge)\s*\n.*?(?=^##\s+|\Z)"
+    )
+    blocks = list(heading_re.finditer(text))
+    if sentinel not in text:
+        return re.sub(
+            r"(?m)^(##\s+(?:Workspace\s+)?Shared (?:Memory|Knowledge)\s*)$",
+            sentinel + r"\n\1",
+            text,
+            count=1,
+        )
+    kept = False
+    for match in reversed(blocks):
+        prefix = text[max(0, match.start() - len(sentinel) - 2):match.start()]
+        is_canonical = sentinel in prefix
+        if is_canonical and not kept:
+            kept = True
+            continue
+        if new_path in match.group(0):
+            text = text[:match.start()] + text[match.end():]
+    return text
+
+
 def cmd_migrate_layout(root: Path, args: argparse.Namespace) -> int:
     plan = _legacy_migration_plan(root)
     plan["from"] = args.from_layout
@@ -2071,12 +2099,7 @@ def cmd_migrate_layout(root: Path, args: argparse.Namespace) -> int:
 
     agents = root / "AGENTS.md"
     if agents.exists():
-        text = agents.read_text(encoding="utf-8")
-        text = text.replace("knowledge/shared-memory/MEMORY.md", "knowledge/facts/workspace/MEMORY.md")
-        sentinel = "<!-- shared-knowledge B1 -->"
-        if sentinel not in text:
-            text = re.sub(r"(?m)^(##+\s+(?:Workspace\s+)?Shared (?:Memory|Knowledge)\s*)$", sentinel + r"\n\1", text, count=1)
-        agents.write_text(text, encoding="utf-8")
+        agents.write_text(_rewrite_legacy_b1(agents.read_text(encoding="utf-8")), encoding="utf-8")
 
     for item in plan["files"]:
         source = root / item["source"]

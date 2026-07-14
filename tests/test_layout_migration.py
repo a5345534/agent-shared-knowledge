@@ -55,6 +55,25 @@ def test_successful_cutover_preserves_content_and_rewrites_b1(tmp_path):
     assert "knowledge/facts/workspace/MEMORY.md" in agents
 
 
+def test_migration_removes_duplicate_legacy_b1_section(tmp_path):
+    root = legacy(tmp_path)
+    (root / "AGENTS.md").write_text(
+        "<!-- shared-knowledge B1 -->\n"
+        "## Workspace Shared Knowledge\n"
+        "See `knowledge/facts/workspace/MEMORY.md`.\n\n"
+        "## Shared Memory\n"
+        "See `knowledge/shared-memory/MEMORY.md`.\n\n"
+        "## Other Guidance\nKeep this.\n"
+    )
+    result = run(root)
+    assert result.returncode == 0, result.stderr
+    agents = (root / "AGENTS.md").read_text()
+    assert agents.count("<!-- shared-knowledge B1 -->") == 1
+    assert agents.count("knowledge/facts/workspace/MEMORY.md") == 1
+    assert "## Shared Memory" not in agents
+    assert "## Other Guidance\nKeep this." in agents
+
+
 def test_collision_refuses_source_cleanup(tmp_path):
     root = legacy(tmp_path)
     destination = root / "knowledge/facts/workspace/fact.md"
