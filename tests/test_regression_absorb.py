@@ -326,6 +326,56 @@ class TestAbsorbCLIRegression:
         assert data["triggered"] is True
         assert data["apply"] is not None
 
+    def test_hook_no_git_mode_never_requires_a_git_repository(self, workspace):
+        """No-git hook mode applies safe changes without staging or committing."""
+        _write_inbox_candidate(
+            workspace,
+            "no-git.md",
+            suggested_action="retain_memory",
+            suggested_scope="workspace",
+        )
+
+        rc, stdout, stderr = _run_absorb(
+            workspace, "hook", "--format", "json",
+            "--inbox-max-count", "0", "--git-mode", "none",
+        )
+
+        assert rc == 0, stderr
+        data = json.loads(stdout)
+        assert data["gitMode"] == "none"
+        assert data["apply"]["changedPaths"]
+        assert data["commit"] is None
+        assert not (workspace / ".git").exists()
+
+    def test_hook_commit_mode_preserves_explicit_git_behavior(self, workspace):
+        """Commit mode stages and commits pressure-triggered safe changes."""
+        _write_inbox_candidate(
+            workspace,
+            "commit.md",
+            suggested_action="retain_memory",
+            suggested_scope="workspace",
+        )
+        subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=workspace, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"],
+            cwd=workspace, check=True,
+        )
+
+        rc, stdout, stderr = _run_absorb(
+            workspace, "hook", "--format", "json",
+            "--inbox-max-count", "0", "--git-mode", "commit",
+        )
+
+        assert rc == 0, stderr
+        data = json.loads(stdout)
+        assert data["gitMode"] == "commit"
+        assert data["commit"]["ok"] is True
+        assert subprocess.run(
+            ["git", "status", "--porcelain"], cwd=workspace,
+            capture_output=True, text=True, check=True,
+        ).stdout == ""
+
     def test_missing_command(self, workspace):
         """Missing command exits with non-zero."""
         result = subprocess.run(

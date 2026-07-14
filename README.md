@@ -82,9 +82,38 @@ knowledge-lint --root .
 ```
 
 > **Tip:** The Pi Package install automatically loads the `shared-knowledge-lifecycle`
-> extension which generates inbox candidates during session compaction and runs
-> the absorber. The `knowledge-absorb`, `knowledge-lint`, and `knowledge-query`
-> commands are available globally via the `bin/` wrappers.
+> extension. Candidate extraction is checkout-safe and review-only by default;
+> repository materialization requires an explicit policy. The `knowledge-absorb`,
+> `knowledge-lint`, and `knowledge-query` commands are available via the package.
+
+### Pi lifecycle materialization policy
+
+The default lifecycle mode reports validated candidates but does not write, stage,
+or commit anything under the active checkout. Choose a materializer explicitly:
+
+```bash
+# Legacy in-checkout inbox writes (explicit opt-in). Post-compact absorption uses
+# --git-mode none, so it never stages or commits automatically.
+export SHARED_KNOWLEDGE_MATERIALIZER=inbox
+
+# Delegate to an adopter-owned worktree/PR materializer. The command is a JSON
+# argv array, is executed without a shell, and receives {version,cwd,candidates}
+# as JSON on stdin.
+export SHARED_KNOWLEDGE_MATERIALIZER=command
+export SHARED_KNOWLEDGE_MATERIALIZER_COMMAND='["/absolute/path/materialize", "--json"]'
+```
+
+Invalid modes or command configuration fail closed without repository writes.
+For manual pressure-triggered absorption, Git policy is explicit:
+
+```bash
+knowledge-absorb --root . hook --git-mode none    # never stage/commit
+knowledge-absorb --root . hook --git-mode commit  # explicit legacy commit behavior
+```
+
+Use either the Pi Package extension or the submodule-generated loader, not both.
+`knowledge-query init` skips loader installation when the project Pi settings
+already declare the `agent-shared-knowledge` package.
 
 **Version pinning:**
 

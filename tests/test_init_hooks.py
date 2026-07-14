@@ -118,6 +118,9 @@ class TestPiLifecycleAdapter:
 
     def _write_agents_md(self, root: Path) -> None:
         (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+        canonical = root / "shared-knowledge" / ".pi" / "extensions" / "shared-knowledge-lifecycle.ts"
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_text("export default function lifecycle() {}\n", encoding="utf-8")
 
     def test_install_extension_ok(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Pi lifecycle extension is installed workspace-locally by default."""
@@ -137,27 +140,33 @@ class TestPiLifecycleAdapter:
         assert ext_path.suffix == ".ts"
         assert "shared-knowledge-lifecycle" in ext_path.name
         assert ext_path.parent.name == "extensions"
-        # Check content has expected Pi API references
         content = ext_path.read_text(encoding="utf-8")
-        assert "session_before_compact" in content
-        assert "session_compact" in content
-        assert "knowledge_absorb" in content
-        assert "detached" in content
-        # Producer calls LLM via Pi's complete() — no Python subprocess
-        assert "complete" in content, "Extension should call Pi's complete()"
-        assert 'from "@earendil-works/pi-ai/compat"' in content
-        assert "serializeConversation" in content
-        assert "convertToLlm" in content
-        assert "ctx.model" in content, "Extension should use the active conversation model"
-        assert "getApiKeyAndHeaders" in content, "Extension should get API key from registry"
-        assert "validateCandidate" in content, "Extension should validate candidates in TS"
-        assert "candidateExists" in content, "Extension should deduplicate candidates"
-        # No env-var injection or Python subprocess for the producer
-        assert "SHARED_KNOWLEDGE_LLM_API_KEY" not in content, "Producer no longer injects env vars"
-        assert "childEnv" not in content, "Producer no longer builds child environment"
-        assert "knowledge_compact_producer.py" not in content, "Producer no longer spawns Python"
-        # Verify braces are balanced in the generated TypeScript
+        assert "Generated loader" in content
+        assert "shared-knowledge/.pi/extensions/shared-knowledge-lifecycle.ts" in content
+        assert "session_before_compact" not in content
         assert content.count("{") == content.count("}"), "TypeScript braces must be balanced"
+
+    def test_install_skips_duplicate_when_pi_package_declared(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "ws"
+        root.mkdir()
+        self._write_agents_md(root)
+        settings = root / ".pi" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(
+            '{"packages":["git:github.com/a5345534/agent-shared-knowledge@main"]}',
+            encoding="utf-8",
+        )
+        fake_home = tmp_path / "home"
+        (fake_home / ".pi").mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        result = pi_lifecycle.install(root)
+
+        assert result["status"] == "skipped"
+        assert "duplicate install skipped" in result["message"]
+        assert not (root / ".pi" / "extensions" / "shared-knowledge-lifecycle.ts").exists()
 
     def test_install_skipped_when_no_pi(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Adapter returns 'skipped' when ~/.pi/ does not exist."""
