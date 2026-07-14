@@ -32,8 +32,15 @@
               "promote_to_module_doc",
               "promote_to_skill",
               "deprecate",
-              "keep_inbox"
+              "keep_inbox",
+              "merge_into_existing"
             ]
+          },
+          "mergeInto": { "type": "string", "description": "Target curated entry path (required when action is merge_into_existing)" },
+          "mergeStrategy": {
+            "type": "string",
+            "enum": ["append_evidence", "update_body", "replace"],
+            "description": "Merge strategy (required when action is merge_into_existing). append_evidence: add new evidence to target's Evidence section. update_body: append candidate body as Additional Context section. replace: replace target entirely."
           },
           "reason": { "type": "string" },
           "evidence": { "type": "array", "items": { "type": "string" } },

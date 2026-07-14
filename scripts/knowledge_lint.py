@@ -612,6 +612,97 @@ def workspace_guidance_files(root: Path) -> list[Path]:
     return files
 
 
+def check_content_overlap(root: Path, findings: list[Finding]) -> None:
+    """Detect curated entries with overlapping content via FTS5 index."""
+    threshold = env_int("SHARED_MEMORY_LINT_DEDUP_THRESHOLD", 70)
+    threshold = max(0, min(100, threshold)) / 100.0
+
+    sqlite_path = root / "knowledge" / ".index" / "memory.sqlite"
+    if not sqlite_path.exists():
+        return
+
+    entries = []
+    shared_root = root / "knowledge/facts"
+    for scan_dir in ("workspace", "module", "capability"):
+        scan_path = shared_root / scan_dir
+        if not scan_path.exists():
+            continue
+        for md_file in sorted(scan_path.rglob("*.md")):
+            if md_file.name in ("README.md", "MEMORY.md"):
+                continue
+            text = md_file.read_text(encoding="utf-8")
+            frontmatter, body = parse_frontmatter(text)
+            if not frontmatter or not frontmatter.get("name"):
+                continue
+            if frontmatter.get("type") == "deprecated":
+                continue
+            entries.append((rel(root, md_file), frontmatter))
+
+    if len(entries) < 2:
+        return
+
+    import sqlite3
+    try:
+        db = sqlite3.connect(str(sqlite_path))
+        db.row_factory = sqlite3.Row
+        try:
+            checked_pairs: set[tuple[str, str]] = set()
+            for location, frontmatter in entries:
+                entry_name = (frontmatter.get("name", "") or "").strip()
+                if not entry_name:
+                    continue
+                sanitized = entry_name.strip().rstrip(".!?,")[:100]
+                rows = db.execute(
+                    """SELECT me.*, rank
+                       FROM memory_entries me
+                       JOIN memory_entries_fts ON me.rowid = memory_entries_fts.rowid
+                       WHERE memory_entries_fts MATCH ?
+                         AND me.type != 'deprecated'
+                       ORDER BY rank
+                       LIMIT 10""",
+                    [sanitized],
+                ).fetchall()
+
+                for row in rows:
+                    other_path = row["path"]
+                    if other_path == location:
+                        continue
+                    pair = tuple(sorted([location, other_path]))
+                    if pair in checked_pairs:
+                        continue
+                    checked_pairs.add(pair)
+
+                    fts_rank = row["rank"] if row["rank"] is not None else -100.0
+                    base = 0.50 if fts_rank <= -0.001 else 0.65
+                    other_name = (row["name"] or "").strip()
+                    entry_name_lower = entry_name.lower()
+                    other_name_lower = other_name.lower()
+
+                    score = base
+                    if entry_name_lower and entry_name_lower == other_name_lower:
+                        score += 0.40
+                    elif entry_name_lower and (entry_name_lower in other_name_lower or other_name_lower in entry_name_lower):
+                        score += 0.30
+                    elif entry_name_lower and any(w in other_name_lower for w in entry_name_lower.split() if len(w) > 3):
+                        score += 0.20
+                    score = max(0.0, score)
+
+                    if score >= threshold:
+                        add_finding(
+                            findings,
+                            "warn",
+                            "content-overlap",
+                            "shared-memory",
+                            location,
+                            f"Content overlaps with {other_path} (similarity score: {score:.2f}). Review and merge, or deprecate one.",
+                            f"Compare {location} and {other_path}; update verified_at or deprecate duplicates.",
+                        )
+        finally:
+            db.close()
+    except sqlite3.OperationalError as exc:
+        print(f"[lint] FTS5 query during content-overlap check failed: {exc}", file=sys.stderr)
+
+
 def check_knowledge_viewport(root: Path, findings: list[Finding]) -> None:
     readme = root / "knowledge/README.md"
     if not readme.exists():
@@ -1508,6 +1599,7 @@ def main() -> int:
     fixes: dict[Path, str] = {}
 
     check_shared_memory(root, findings, fixes, args.staleness_threshold)
+    check_content_overlap(root, findings)
     check_module_map(root, findings)
     check_markdown_links(root, workspace_guidance_files(root), "guidance-path-broken", "workspace-guidance", findings)
     check_knowledge_viewport(root, findings)

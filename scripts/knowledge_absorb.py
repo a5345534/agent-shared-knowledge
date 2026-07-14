@@ -25,10 +25,13 @@ ACTION_VALUES = {
     "promote_to_skill",
     "deprecate",
     "keep_inbox",
+    "merge_into_existing",
 }
 DEFAULT_INBOX_MAX_AGE_DAYS = 14
 DEFAULT_INBOX_MAX_COUNT = 20
 DEFAULT_WORKSPACE_MAX_COUNT = 20
+DEFAULT_DEDUP_THRESHOLD_HIGH = 0.85
+DEFAULT_DEDUP_THRESHOLD_MEDIUM = 0.60
 PLAN_VERSION = "1"
 
 FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
@@ -316,10 +319,138 @@ def destination_for_candidate(frontmatter: dict[str, Any]) -> tuple[str | None, 
     return normalized_scope, f"{directory}/{base}.md"
 
 
+def dedup_check(root: Path, frontmatter: dict[str, Any], body: str) -> dict | None:
+    """Check if an inbox candidate overlaps with existing curated entries.
+
+    Uses name/description matching with FTS5 as a pre-filter.
+    Score = base 0.5 (FTS5 found a match) + name match (~0.35) + description overlap (~0.15).
+    Returns the best-matching entry if score exceeds thresholds.
+    """
+    high_threshold = env_int("SHARED_MEMORY_DEDUP_THRESHOLD_HIGH", int(DEFAULT_DEDUP_THRESHOLD_HIGH * 100))
+    high_threshold = max(0, min(100, high_threshold)) / 100.0
+    medium_threshold = env_int("SHARED_MEMORY_DEDUP_THRESHOLD_MEDIUM", int(DEFAULT_DEDUP_THRESHOLD_MEDIUM * 100))
+    medium_threshold = max(0, min(100, medium_threshold)) / 100.0
+
+    sqlite_path = root / "knowledge" / ".index" / "memory.sqlite"
+    if not sqlite_path.exists():
+        print("[absorb] FTS5 index not found at knowledge/.index/memory.sqlite — skipping dedup check", file=sys.stderr)
+        return None
+
+    candidate_name = clean_line(frontmatter.get("name", ""), 120) or ""
+    candidate_desc = clean_line(frontmatter.get("description", ""), 180) or ""
+    if not candidate_name and not candidate_desc:
+        return None
+
+    import sqlite3
+    try:
+        db = sqlite3.connect(str(sqlite_path))
+        db.row_factory = sqlite3.Row
+        try:
+            fts_query_text = (candidate_name or candidate_desc).strip().rstrip(".!?,")[:100]
+            if not fts_query_text:
+                return None
+
+            fts_sql = """SELECT me.*, rank
+                         FROM memory_entries me
+                         JOIN memory_entries_fts ON me.rowid = memory_entries_fts.rowid
+                         WHERE memory_entries_fts MATCH ?
+                           AND me.type != 'deprecated'
+                         ORDER BY rank
+                         LIMIT 10"""
+            rows = db.execute(fts_sql, [fts_query_text]).fetchall()
+
+            if not rows:
+                return None
+
+            best_score = -1.0
+            best_row = None
+
+            for row in rows:
+                fts_rank = row["rank"] if row["rank"] is not None else -100.0
+                base = 0.50 if fts_rank <= -0.001 else 0.65
+
+                entry_name = (row["name"] or "").strip()
+                entry_desc = (row["description"] or "").strip()
+                name_lower = entry_name.lower()
+                desc_lower = entry_desc.lower()
+                cand_name_lower = candidate_name.lower() if candidate_name else ""
+                cand_desc_lower = candidate_desc.lower() if candidate_desc else ""
+
+                score = base
+
+                if cand_name_lower and cand_name_lower == name_lower:
+                    score += 0.40
+                elif cand_name_lower and (cand_name_lower in name_lower or name_lower in cand_name_lower):
+                    score += 0.30
+                elif cand_name_lower and any(w in name_lower for w in cand_name_lower.split() if len(w) > 3):
+                    score += 0.20
+
+                if cand_desc_lower and cand_desc_lower == desc_lower:
+                    score += 0.15
+                elif cand_desc_lower and (cand_desc_lower in desc_lower or desc_lower in cand_desc_lower):
+                    score += 0.10
+                elif cand_desc_lower and any(w in desc_lower for w in cand_desc_lower.split() if len(w) > 4):
+                    score += 0.05
+
+                if score > best_score:
+                    best_score = score
+                    best_row = row
+
+            if best_row is None:
+                return None
+
+            entry_path = best_row["path"]
+
+            if best_score >= high_threshold:
+                return {
+                    "match": {"path": entry_path, "score": round(best_score, 4), "name": best_row["name"]},
+                    "confidence": "high",
+                    "action": "merge_into_existing",
+                    "mergeInto": entry_path,
+                    "reason": f"Similarity score {best_score:.2f} >= {high_threshold:.2f}: high similarity to {entry_path}",
+                }
+            elif best_score >= medium_threshold:
+                return {
+                    "match": {"path": entry_path, "score": round(best_score, 4), "name": best_row["name"]},
+                    "confidence": "medium",
+                    "action": "keep_inbox",
+                    "reason": f"Similarity score {best_score:.2f} >= {medium_threshold:.2f}: possible overlap with {entry_path}, needs review",
+                }
+            return None
+        finally:
+            db.close()
+    except sqlite3.OperationalError as exc:
+        print(f"[absorb] FTS5 query failed: {exc}", file=sys.stderr)
+        return None
+
+
 def classify_candidate(root: Path, path: Path) -> PlanAction:
     text = path.read_text(encoding="utf-8")
     frontmatter, body = parse_frontmatter(text)
     location = rel(root, path)
+
+    # Dedup pre-check: query existing curated entries via FTS5
+    dedup_result = dedup_check(root, frontmatter, body)
+    if dedup_result and dedup_result["action"] == "merge_into_existing":
+        merge_into = dedup_result["mergeInto"]
+        return PlanAction(
+            candidatePath=location,
+            action="merge_into_existing",
+            reason=dedup_result.get("reason", ""),
+            evidence=evidence_list(frontmatter, body),
+            destination=merge_into,
+            confidence=0.85,
+            safeToApply=True,
+            metadata={
+                "mergeInto": merge_into,
+                "mergeStrategy": "append_evidence",
+                "source": frontmatter.get("capture_source") or frontmatter.get("source") or "",
+                "suggestedScope": frontmatter.get("suggested_scope") or frontmatter.get("scope") or "workspace",
+                "name": clean_line(frontmatter.get("name"), 80),
+                "description": clean_line(frontmatter.get("description"), 180),
+            },
+        )
+
     combined = "\n".join(
         str(frontmatter.get(key, "")) for key in ("name", "description", "reason", "suggested_action")
     ) + "\n" + body
@@ -327,6 +458,26 @@ def classify_candidate(root: Path, path: Path) -> PlanAction:
     evidence = evidence_list(frontmatter, body)
     suggested = clean_line(frontmatter.get("suggested_action"), 80)
     action = suggested if suggested in ACTION_VALUES else ""
+
+    # If dedup found medium-similarity, override to keep_inbox
+    if dedup_result and dedup_result["action"] == "keep_inbox":
+        action = "keep_inbox"
+        reason = dedup_result.get("reason", "Possible content overlap, needs review.")
+        return PlanAction(
+            candidatePath=location,
+            action="keep_inbox",
+            reason=reason,
+            evidence=evidence_list(frontmatter, body),
+            destination=None,
+            confidence=0.45,
+            safeToApply=False,
+            metadata={
+                "source": frontmatter.get("capture_source") or frontmatter.get("source") or "",
+                "suggestedScope": frontmatter.get("suggested_scope") or frontmatter.get("scope") or "workspace",
+                "name": clean_line(frontmatter.get("name"), 80),
+                "description": clean_line(frontmatter.get("description"), 180),
+            },
+        )
 
     if not action:
         if re.search(r"\b(module docs|runbook|docs/architecture|docs/operations|docs/runbooks|operation guide)\b", lowered):
@@ -612,6 +763,24 @@ def unique_destination(root: Path, destination: str) -> Path:
     raise RuntimeError(f"Could not find unique destination for {destination}")
 
 
+def _parse_yaml_list(value: Any) -> list[str]:
+    """Parse a YAML list value that might be a string or already a list."""
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    if not isinstance(value, str):
+        return []
+    raw = value.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        import json
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return [raw]
+    if raw.startswith("\"") or raw.startswith("'"):
+        return [raw.strip("'\"")]
+    return [raw]
+
+
 def render_curated_memory(frontmatter: dict[str, Any], body: str, normalized_scope: str) -> str:
     name = clean_line(frontmatter.get("name"), 80) or "Captured shared-memory fact"
     description = clean_line(frontmatter.get("description"), 180) or "Captured shared-memory fact."
@@ -622,6 +791,7 @@ def render_curated_memory(frontmatter: dict[str, Any], body: str, normalized_sco
     reason = clean_line(frontmatter.get("reason"), 800)
     evidence = evidence_list(frontmatter, body)
     body_text = body.strip() or description
+    supersedes = _parse_yaml_list(frontmatter.get("supersedes", []))
 
     lines = [
         "---",
@@ -631,10 +801,24 @@ def render_curated_memory(frontmatter: dict[str, Any], body: str, normalized_sco
         f"scope: {normalized_scope}",
         f"verified_at: {today()}",
         f"source: {source}",
+    ]
+    if supersedes:
+        lines.append("supersedes:")
+        for item in supersedes:
+            lines.append(f"  - {yaml_scalar(item)}")
+    sb = frontmatter.get("superseded_by")
+    if sb:
+        lines.append(f"superseded_by: {yaml_scalar(_parse_yaml_list(sb)[0] if isinstance(sb, str) and (sb.startswith(\"['\") or sb.startswith(\"[\")) else sb)}")
+    see_also = _parse_yaml_list(frontmatter.get("see_also", []))
+    if see_also:
+        lines.append("see_also:")
+        for item in see_also:
+            lines.append(f"  - {yaml_scalar(item)}")
+    lines.extend([
         "---",
         "",
         body_text,
-    ]
+    ])
     if reason and "## Why this is shared" not in body_text:
         lines.extend(["", "## Why this is shared", "", reason])
     if evidence and "## Evidence" not in body_text:
@@ -720,6 +904,96 @@ def apply_retain_memory(root: Path, action: dict[str, Any]) -> tuple[list[str], 
     return changed, None
 
 
+def rebuild_entry_with_evidence(frontmatter: dict[str, Any], body: str, new_evidence: list[str]) -> str:
+    """Rebuild a curated entry with merged evidence, deduplicating."""
+    existing_evidence = evidence_list(frontmatter, body)
+    all_evidence = list(dict.fromkeys(existing_evidence + new_evidence))
+    body_clean = re.sub(r"(?im)^## Evidence\s*$.*?(?=^## |\Z)", "", body, count=1, flags=re.DOTALL).strip()
+    if "## Evidence" not in body_clean:
+        body_clean += "\n\n## Evidence"
+        for item in all_evidence:
+            body_clean += f"\n- {item}"
+    else:
+        body_clean += "\n"
+        for item in all_evidence:
+            body_clean += f"\n- {item}"
+    return body_clean
+
+
+def dedup_supersedes(existing: Any, new_path: str) -> list[str]:
+    """Deduplicate supersedes list, appending new_path if not already present."""
+    from knowledge_absorb import _parse_yaml_list
+    items = _parse_yaml_list(existing) if not isinstance(existing, list) else [str(v) for v in existing]
+    items = list(dict.fromkeys(items))
+    if new_path not in items:
+        items.append(new_path)
+    return items
+
+
+def apply_merge_into_existing(root: Path, action: dict[str, Any]) -> tuple[list[str], str | None]:
+    """Merge inbox candidate content into an existing curated entry."""
+    source_path = root / action["candidatePath"]
+    merge_into = action.get("mergeInto", "") or action.get("destination", "") or ""
+    if not merge_into:
+        return [], f"missing mergeInto/destination for {action['candidatePath']}"
+    target_path = root / merge_into
+
+    if not source_path.exists():
+        return [], f"missing candidate: {action['candidatePath']}"
+    if not target_path.exists():
+        return [], f"missing target: {merge_into}"
+
+    source_text = source_path.read_text(encoding="utf-8")
+    target_text = target_path.read_text(encoding="utf-8")
+    src_fm, src_body = parse_frontmatter(source_text)
+    tgt_fm, tgt_body = parse_frontmatter(target_text)
+
+    strategy = action.get("mergeStrategy", "append_evidence")
+
+    if strategy == "replace":
+        normalized = normalize_scope(str(action.get("metadata", {}).get("suggestedScope") or src_fm.get("suggested_scope") or "workspace"))
+        normalized_scope = normalized[0] if normalized else tgt_fm.get("scope", "workspace")
+        merged_fm = dict(src_fm)
+        merged_fm["scope"] = normalized_scope
+        merged_fm["verified_at"] = today()
+        merged_fm["source"] = f"{tgt_fm.get('source', '')} + {src_fm.get('source', '')}"
+        supersedes = dedup_supersedes(tgt_fm.get("supersedes", []), action["candidatePath"])
+        if supersedes:
+            merged_fm["supersedes"] = supersedes
+        merged_body = src_body.strip() or ""
+        merged = render_curated_memory(merged_fm, merged_body, normalized_scope)
+
+    elif strategy == "update_body":
+        merged_body = tgt_body.strip()
+        if src_body.strip():
+            merged_body += f"\n\n## Additional Context\n\n{src_body.strip()}\n"
+        merged_fm = dict(tgt_fm)
+        merged_fm["verified_at"] = today()
+        merged_fm["source"] = f"{tgt_fm.get('source', '')} + {src_fm.get('source', '')}"
+        supersedes = dedup_supersedes(tgt_fm.get("supersedes", []), action["candidatePath"])
+        if supersedes:
+            merged_fm["supersedes"] = supersedes
+        scope = tgt_fm.get("scope", "workspace")
+        merged = render_curated_memory(merged_fm, merged_body, scope)
+
+    else:  # append_evidence (default)
+        new_evidence = evidence_list(src_fm, src_body)
+        merged_body = rebuild_entry_with_evidence(tgt_fm, tgt_body, new_evidence)
+        merged_fm = dict(tgt_fm)
+        merged_fm["verified_at"] = today()
+        merged_fm["source"] = f"{tgt_fm.get('source', '')} + {src_fm.get('source', '')}"
+        supersedes = dedup_supersedes(tgt_fm.get("supersedes", []), action["candidatePath"])
+        if supersedes:
+            merged_fm["supersedes"] = supersedes
+        scope = tgt_fm.get("scope", "workspace")
+        merged = render_curated_memory(merged_fm, merged_body, scope)
+
+    target_path.write_text(merged, encoding="utf-8")
+    source_path.unlink()
+
+    return [rel(root, target_path), rel(root, source_path)], None
+
+
 def apply_plan(root: Path, plan: dict[str, Any], safe_only: bool) -> ApplyResult:
     changed: list[str] = []
     skipped: list[str] = []
@@ -749,13 +1023,19 @@ def apply_plan(root: Path, plan: dict[str, Any], safe_only: bool) -> ApplyResult
                 follow_ups.append(f"{candidate_path}: {action_name} -> {action.get('destination') or '(needs destination)'}")
             continue
 
-        if action_name == "retain_memory" and action.get("safeToApply"):
+        if action_name == "merge_into_existing" and action.get("safeToApply"):
+            action_changed, error = apply_merge_into_existing(root, action)
+            if error:
+                skipped.append(error)
+            else:
+                changed.extend(action_changed)
+        elif action_name == "retain_memory" and action.get("safeToApply"):
             action_changed, error = apply_retain_memory(root, action)
             if error:
                 skipped.append(error)
             else:
                 changed.extend(action_changed)
-        elif action_name != "keep_inbox":
+        elif action_name not in ("keep_inbox", "merge_into_existing"):
             follow_ups.append(f"{candidate_path}: {action_name} -> {action.get('destination') or '(needs destination)'}")
     return ApplyResult(sorted(set(changed)), skipped, follow_ups)
 
