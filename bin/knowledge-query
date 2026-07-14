@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# knowledge-query — FTS5 query, resolve, inject, build index
+# Installed as part of the agent-shared-knowledge Pi package.
+set -euo pipefail
+DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+exec python3 "$DIR/scripts/knowledge_query.py" "$@"
