@@ -117,7 +117,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     const materializer = parseMaterializerConfig();
     const result = await materializeCandidates(materializer, candidates, ctx.cwd);
     if (result.mode === "inbox" && result.written.length > 0) await runAbsorber(ctx.cwd);
-    if (job.payload.source && (result.mode !== "inbox" || result.written.length > 0 || candidates.length === 0)) {
+    if (job.payload.source) {
       await runSourceAck(ctx.cwd, job.payload.source.instanceId, job.payload.source.runId);
     }
     const state = result.mode === "review" ? "review-ready" : "done";

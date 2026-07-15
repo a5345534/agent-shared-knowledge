@@ -57,6 +57,7 @@ def test_git_collection_incremental_enqueue_ack_and_provenance(tmp_path: Path, m
     assert payload["payload"]["source"]["evidencePaths"][0].startswith("source://git-default/")
     ack = sources.acknowledge(root, "git-default", first["runId"])
     assert ack["cursor"]["gitHead"] == git(root, "rev-parse", "HEAD")
+    assert sources.acknowledge(root, "git-default", first["runId"])["alreadyAcknowledged"] is True
     (root / "policy.md").write_text("A new durable policy\n", encoding="utf-8")
     git(root, "add", "policy.md"); git(root, "commit", "-m", "add policy")
     second = sources.collect_git(root, source)
@@ -161,6 +162,17 @@ def test_managed_guidance_preserves_content_and_rejects_malformed(tmp_path: Path
         views.managed_section(path, "bad", False)
     with pytest.raises(ValueError, match="escapes"):
         views.guidance_target(tmp_path, "../outside.md")
+    actual = tmp_path / "actual.md"; actual.write_text("owned")
+    link = tmp_path / "linked.md"; link.symlink_to(actual)
+    with pytest.raises(ValueError, match="symlink"):
+        views.guidance_target(tmp_path, "linked.md")
+
+
+def test_derived_snapshot_refuses_symlink(tmp_path: Path):
+    output = tmp_path / "view"; output.mkdir(); target = tmp_path / "outside.md"; target.write_text("secret")
+    (output / "linked.md").symlink_to(target)
+    with pytest.raises(ValueError, match="symlink"):
+        views.snapshot(output)
 
 
 def test_generated_pages_are_outside_canonical_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

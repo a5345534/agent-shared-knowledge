@@ -109,6 +109,7 @@ def snapshot(output: Path) -> str:
     digest = hashlib.sha256()
     if not output.exists(): return digest.hexdigest()
     for path in sorted(output.glob("**/*")):
+        if path.is_symlink(): raise ValueError(f"derived snapshot refuses symlink: {path}")
         if not path.is_file() or path.name in {METADATA_FILE, OWNER_FILE}: continue
         digest.update(path.relative_to(output).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
     return digest.hexdigest()
@@ -167,9 +168,10 @@ def update_view(workspace: Path, configured: str, response_file: Path | None) ->
 
 def guidance_target(workspace: Path, configured: str) -> Path:
     if Path(configured).is_absolute(): raise ValueError("guidance path must be workspace-relative")
-    target = (workspace / configured).resolve()
+    unresolved = workspace / configured
+    if unresolved.is_symlink(): raise ValueError("guidance path must not be a symlink")
+    target = unresolved.resolve()
     if not within(target, workspace): raise ValueError("guidance path escapes workspace")
-    if target.exists() and target.is_symlink(): raise ValueError("guidance path must not be a symlink")
     return target
 
 
