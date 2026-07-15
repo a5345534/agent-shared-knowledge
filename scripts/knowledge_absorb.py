@@ -1248,7 +1248,7 @@ def add_threshold_args(parser: argparse.ArgumentParser) -> None:
 
 def _rebuild_query_index(root: Path) -> None:
     """Invoke knowledge_query.py rebuild-index as a subprocess."""
-    query_script = root / "scripts" / "knowledge_query.py"
+    query_script = Path(__file__).resolve().with_name("knowledge_query.py")
     if not query_script.exists():
         print(f"[absorb] knowledge_query.py not found at {query_script}, skipping index rebuild", file=sys.stderr)
         return
