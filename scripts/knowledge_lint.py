@@ -204,6 +204,20 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_similarity_threshold(name: str, default: float) -> float:
+    """Read a similarity threshold as a 0..1 fraction or 0..100 percentage."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if value > 1:
+        value /= 100.0
+    return max(0.0, min(1.0, value))
+
+
 def expected_memory_scope(root: Path, path: Path) -> str | None:
     relative = path.relative_to(root / "knowledge/facts")
     parts = relative.parts
@@ -615,11 +629,14 @@ def workspace_guidance_files(root: Path, include_adopter_topology: bool = False)
 
 def check_content_overlap(root: Path, findings: list[Finding]) -> None:
     """Detect curated entries with overlapping content via FTS5 index."""
-    threshold = env_int("SHARED_MEMORY_LINT_DEDUP_THRESHOLD", 70)
-    threshold = max(0, min(100, threshold)) / 100.0
+    threshold = env_similarity_threshold("SHARED_MEMORY_LINT_DEDUP_THRESHOLD", 0.70)
 
     sqlite_path = root / "knowledge" / ".index" / "memory.sqlite"
     if not sqlite_path.exists():
+        print(
+            "[lint] FTS5 index not found at knowledge/.index/memory.sqlite — skipping content-overlap check",
+            file=sys.stderr,
+        )
         return
 
     entries = []

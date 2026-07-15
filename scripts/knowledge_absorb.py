@@ -166,6 +166,20 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_similarity_threshold(name: str, default: float) -> float:
+    """Read a similarity threshold as a 0..1 fraction or 0..100 percentage."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if value > 1:
+        value /= 100.0
+    return max(0.0, min(1.0, value))
+
+
 def index_headings() -> dict[str, str]:
     raw = os.environ.get("SHARED_MEMORY_INDEX_HEADINGS")
     if raw:
@@ -357,10 +371,12 @@ def dedup_check(root: Path, frontmatter: dict[str, Any], body: str) -> dict | No
     Score = base 0.5 (FTS5 found a match) + name match (~0.35) + description overlap (~0.15).
     Returns the best-matching entry if score exceeds thresholds.
     """
-    high_threshold = env_int("SHARED_MEMORY_DEDUP_THRESHOLD_HIGH", int(DEFAULT_DEDUP_THRESHOLD_HIGH * 100))
-    high_threshold = max(0, min(100, high_threshold)) / 100.0
-    medium_threshold = env_int("SHARED_MEMORY_DEDUP_THRESHOLD_MEDIUM", int(DEFAULT_DEDUP_THRESHOLD_MEDIUM * 100))
-    medium_threshold = max(0, min(100, medium_threshold)) / 100.0
+    high_threshold = env_similarity_threshold(
+        "SHARED_MEMORY_DEDUP_THRESHOLD_HIGH", DEFAULT_DEDUP_THRESHOLD_HIGH
+    )
+    medium_threshold = env_similarity_threshold(
+        "SHARED_MEMORY_DEDUP_THRESHOLD_MEDIUM", DEFAULT_DEDUP_THRESHOLD_MEDIUM
+    )
 
     sqlite_path = root / "knowledge" / ".index" / "memory.sqlite"
     if not sqlite_path.exists():
@@ -975,6 +991,16 @@ def dedup_supersedes(existing: Any, new_path: str) -> list[str]:
     return items
 
 
+def merge_sources(*values: Any) -> str:
+    """Combine source authorities without repeating an existing source."""
+    sources: list[str] = []
+    for value in values:
+        for item in re.split(r"\s+\+\s+", str(value or "").strip()):
+            if item and item not in sources:
+                sources.append(item)
+    return " + ".join(sources)
+
+
 def apply_merge_into_existing(root: Path, action: dict[str, Any]) -> tuple[list[str], str | None]:
     """Merge inbox candidate content into an existing curated entry."""
     source_path = root / action["candidatePath"]
@@ -997,14 +1023,17 @@ def apply_merge_into_existing(root: Path, action: dict[str, Any]) -> tuple[list[
 
     if strategy == "replace":
         normalized = normalize_scope(str(action.get("metadata", {}).get("suggestedScope") or src_fm.get("suggested_scope") or "workspace"))
-        normalized_scope = normalized[0] if normalized else tgt_fm.get("scope", "workspace")
+        normalized_scope = tgt_fm.get("scope") or (normalized[0] if normalized else "workspace")
         merged_fm = dict(src_fm)
         merged_fm["scope"] = normalized_scope
         merged_fm["verified_at"] = today()
-        merged_fm["source"] = f"{tgt_fm.get('source', '')} + {src_fm.get('source', '')}"
+        merged_fm.pop("capture_source", None)
+        merged_fm["source"] = merge_sources(tgt_fm.get("source"), src_fm.get("source"))
         supersedes = dedup_supersedes(tgt_fm.get("supersedes", []), action["candidatePath"])
         if supersedes:
             merged_fm["supersedes"] = supersedes
+        if tgt_fm.get("see_also"):
+            merged_fm["see_also"] = tgt_fm["see_also"]
         merged_body = src_body.strip() or ""
         merged = render_curated_memory(merged_fm, merged_body, normalized_scope)
 
@@ -1014,7 +1043,7 @@ def apply_merge_into_existing(root: Path, action: dict[str, Any]) -> tuple[list[
             merged_body += f"\n\n## Additional Context\n\n{src_body.strip()}\n"
         merged_fm = dict(tgt_fm)
         merged_fm["verified_at"] = today()
-        merged_fm["source"] = f"{tgt_fm.get('source', '')} + {src_fm.get('source', '')}"
+        merged_fm["source"] = merge_sources(tgt_fm.get("source"), src_fm.get("source"))
         supersedes = dedup_supersedes(tgt_fm.get("supersedes", []), action["candidatePath"])
         if supersedes:
             merged_fm["supersedes"] = supersedes
@@ -1026,7 +1055,7 @@ def apply_merge_into_existing(root: Path, action: dict[str, Any]) -> tuple[list[
         merged_body = rebuild_entry_with_evidence(tgt_fm, tgt_body, new_evidence)
         merged_fm = dict(tgt_fm)
         merged_fm["verified_at"] = today()
-        merged_fm["source"] = f"{tgt_fm.get('source', '')} + {src_fm.get('source', '')}"
+        merged_fm["source"] = merge_sources(tgt_fm.get("source"), src_fm.get("source"))
         supersedes = dedup_supersedes(tgt_fm.get("supersedes", []), action["candidatePath"])
         if supersedes:
             merged_fm["supersedes"] = supersedes
