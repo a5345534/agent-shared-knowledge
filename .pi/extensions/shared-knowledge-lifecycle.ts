@@ -9,6 +9,7 @@ import {
   KnowledgeJobQueue,
   createCapturedPayload,
   isMeaningfulConversation,
+  normalizeConversation,
   parseQueueConfig,
   type KnowledgeJob,
 } from "../../src/knowledge-job-runtime.ts";
@@ -148,13 +149,20 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     const batch = queue.nextReadyBatch();
     const first = batch[0];
     if (!first) return;
-    const job = batch.length > 1 && first.payload ? {
+    const combined = batch.length > 1
+      ? normalizeConversation(
+        batch.map((item, index) => `--- captured segment ${index + 1} ---\n${item.payload?.conversation ?? ""}`).join("\n\n"),
+        queue.config.maxPayloadBytes,
+        queue.config.excludePatterns ?? [],
+      )
+      : null;
+    const job = combined && first.payload ? {
       ...first,
       payload: {
         ...first.payload,
-        conversation: batch.map((item, index) => `--- captured segment ${index + 1} ---\n${item.payload?.conversation ?? ""}`).join("\n\n"),
-        originalBytes: batch.reduce((total, item) => total + (item.payload?.originalBytes ?? 0), 0),
-        truncated: batch.some((item) => item.payload?.truncated),
+        conversation: combined.text,
+        originalBytes: combined.originalBytes,
+        truncated: combined.truncated || batch.some((item) => item.payload?.truncated),
       },
     } : first;
     running.add(cwd);

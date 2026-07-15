@@ -136,9 +136,12 @@ def test_derived_path_guards_and_openwiki_collision(tmp_path: Path, monkeypatch:
     root = git_workspace(tmp_path, monkeypatch); result_file = tmp_path / "bad.json"
     with pytest.raises(ValueError, match="overlaps"):
         views.resolve_output(root, "knowledge/facts")
+    response(result_file); views.update_view(root, views.DEFAULT_VIEW, result_file)
+    existing = (root / views.DEFAULT_VIEW / "quickstart.md").read_text()
     result_file.write_text(json.dumps({"pages": [{"path": "../facts/evil.md", "title": "Bad", "body": "Bad body"}]}))
     with pytest.raises(ValueError, match="unsafe"):
         views.update_view(root, views.DEFAULT_VIEW, result_file)
+    assert (root / views.DEFAULT_VIEW / "quickstart.md").read_text() == existing
     (root / "openwiki").mkdir(); (root / "openwiki/.last-update.json").write_text("{}")
     with pytest.raises(ValueError, match="owned"):
         views.update_view(root, "openwiki", result_file)
@@ -151,6 +154,9 @@ def test_managed_guidance_preserves_content_and_rejects_malformed(tmp_path: Path
     views.managed_section(path, "second", False)
     assert path.read_text().count(views.START) == 1 and "second" in path.read_text()
     path.write_text(path.read_text() + views.START)
+    with pytest.raises(ValueError, match="malformed"):
+        views.managed_section(path, "bad", False)
+    path.write_text(f"{views.END}\nowned\n{views.START}\n")
     with pytest.raises(ValueError, match="malformed"):
         views.managed_section(path, "bad", False)
     with pytest.raises(ValueError, match="escapes"):

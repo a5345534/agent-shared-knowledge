@@ -135,20 +135,28 @@ def update_view(workspace: Path, configured: str, response_file: Path | None) ->
     result = json.loads(response_file.read_text(encoding="utf-8")) if response_file else call_model(evidence)
     pages = result.get("pages", [])
     if not isinstance(pages, list): raise ValueError("model response pages must be an array")
-    before = snapshot(output); output.mkdir(parents=True, exist_ok=True)
-    (output / OWNER_FILE).write_text(json.dumps({"version": VERSION, "owner": "agent-shared-knowledge"}, indent=2) + "\n", encoding="utf-8")
-    desired = {str(page.get("path", "")) for page in pages if isinstance(page, dict)}
-    for existing in output.glob("**/*.md"):
-        if existing.relative_to(output).as_posix() not in desired:
-            if existing.is_symlink(): raise ValueError(f"refusing stale symlink output: {existing}")
-            existing.unlink()
-    written = []
+    validated_pages: list[tuple[str, str, str, list[str], Path]] = []
     for page in pages:
-        if not isinstance(page, dict): continue
+        if not isinstance(page, dict): raise ValueError("each page must be an object")
         relative = str(page.get("path", "")); title = str(page.get("title", "")).strip(); body = str(page.get("body", "")).strip()
-        if not relative.endswith(".md") or not title or not body: raise ValueError("each page requires safe .md path, title, and body")
-        path = safe_page_path(output, relative); path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(label_page(title, body, [str(x) for x in page.get("evidence", [])]), encoding="utf-8")
+        evidence_items = page.get("evidence", [])
+        if not relative.endswith(".md") or not title or not body or not isinstance(evidence_items, list):
+            raise ValueError("each page requires safe .md path, title, body, and evidence array")
+        validated_pages.append((relative, title, body, [str(x) for x in evidence_items], safe_page_path(output, relative)))
+    before = snapshot(output)
+    desired = {item[0] for item in validated_pages}
+    if output.exists():
+        for existing in output.glob("**/*.md"):
+            if existing.relative_to(output).as_posix() not in desired and existing.is_symlink():
+                raise ValueError(f"refusing stale symlink output: {existing}")
+    output.mkdir(parents=True, exist_ok=True)
+    (output / OWNER_FILE).write_text(json.dumps({"version": VERSION, "owner": "agent-shared-knowledge"}, indent=2) + "\n", encoding="utf-8")
+    for existing in output.glob("**/*.md"):
+        if existing.relative_to(output).as_posix() not in desired: existing.unlink()
+    written = []
+    for relative, title, body, evidence_items, path in validated_pages:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(label_page(title, body, evidence_items), encoding="utf-8")
         written.append(relative)
     after = snapshot(output); changed = before != after
     if changed:
@@ -168,7 +176,8 @@ def guidance_target(workspace: Path, configured: str) -> Path:
 def managed_section(path: Path, content: str, dry_run: bool) -> dict[str, Any]:
     current = path.read_text(encoding="utf-8") if path.exists() else ""
     starts, ends = current.count(START), current.count(END)
-    if starts > 1 or ends > 1 or starts != ends: raise ValueError(f"malformed or duplicate managed sentinel in {path}")
+    if starts > 1 or ends > 1 or starts != ends or (starts == 1 and current.index(END) < current.index(START)):
+        raise ValueError(f"malformed or duplicate managed sentinel in {path}")
     block = f"{START}\n\n{content.strip()}\n\n{END}"
     if starts == 1:
         begin, finish = current.index(START), current.index(END) + len(END)
