@@ -130,6 +130,11 @@ def update_view(workspace: Path, configured: str, response_file: Path | None) ->
     if not isinstance(pages, list): raise ValueError("model response pages must be an array")
     before = snapshot(output); output.mkdir(parents=True, exist_ok=True)
     (output / OWNER_FILE).write_text(json.dumps({"version": VERSION, "owner": "agent-shared-knowledge"}, indent=2) + "\n", encoding="utf-8")
+    desired = {str(page.get("path", "")) for page in pages if isinstance(page, dict)}
+    for existing in output.glob("**/*.md"):
+        if existing.relative_to(output).as_posix() not in desired:
+            if existing.is_symlink(): raise ValueError(f"refusing stale symlink output: {existing}")
+            existing.unlink()
     written = []
     for page in pages:
         if not isinstance(page, dict): continue

@@ -161,10 +161,11 @@ def collect_git(workspace: Path, source: dict[str, Any], enqueue: bool = False) 
     evidence_path = raw_dir / "git-evidence.json"
     atomic_json(evidence_path, evidence)
     prior_snapshot = state.get("snapshot")
+    no_relevant_change = bool(previous) and not paths
     manifest = {"version": VERSION, "sourceId": source_id, "sourceType": "git", "runId": run_id,
                 "collectedAt": now(), "snapshot": snapshot, "priorSnapshot": prior_snapshot,
-                "status": "noop" if snapshot == prior_snapshot or not paths and not status and previous == head else "success",
-                "warnings": [fallback] if fallback else [], "rawFiles": [str(evidence_path)],
+                "status": "noop" if snapshot == prior_snapshot or no_relevant_change else "success",
+                "warnings": ([fallback] if fallback else []) + (["all changed paths were excluded or no relevant paths changed"] if no_relevant_change else []), "rawFiles": [str(evidence_path)],
                 "proposedCursor": {"gitHead": head}}
     manifest_path = raw_dir / "manifest.json"
     atomic_json(manifest_path, manifest)
@@ -172,6 +173,8 @@ def collect_git(workspace: Path, source: dict[str, Any], enqueue: bool = False) 
     state["runs"] = [run_summary, *state.get("runs", [])][:20]
     state["pending"] = {"runId": run_id, "gitHead": head, "snapshot": snapshot, "manifest": str(manifest_path)}
     atomic_json(source_dir(workspace, source_id) / "state.json", state)
+    if manifest["status"] == "noop":
+        acknowledge(workspace, source_id, run_id)
     if enqueue and manifest["status"] != "noop":
         manifest["jobId"] = enqueue_manifest(workspace, manifest, evidence)
         atomic_json(manifest_path, manifest)

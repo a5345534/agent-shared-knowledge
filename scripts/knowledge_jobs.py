@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Safe status and retention operations for private knowledge jobs."""
 from __future__ import annotations
-import argparse, datetime as dt, json, os
+import argparse, datetime as dt, json, os, sys
 from pathlib import Path
 from knowledge_sources import runtime_root
 
@@ -17,13 +17,22 @@ def jobs(root: Path) -> list[tuple[Path, dict]]:
     return result
 
 def safe(job: dict) -> dict:
-    return {key:job.get(key) for key in ("id","state","createdAt","updatedAt","attempts","nextAttemptAt","modelHint","error","result") if job.get(key) is not None} | {"hasPayload": bool(job.get("payload"))}
+    value = {key:job.get(key) for key in ("id","state","createdAt","updatedAt","attempts","nextAttemptAt","modelHint","error") if job.get(key) is not None}
+    result = job.get("result")
+    if isinstance(result, dict):
+        value["result"] = {key: result.get(key) for key in ("candidateCount", "materializer", "written") if result.get(key) is not None}
+    return value | {"hasPayload": bool(job.get("payload"))}
 
 def main()->int:
     p=argparse.ArgumentParser();p.add_argument("--root",default="."); sub=p.add_subparsers(dest="command",required=True)
-    sub.add_parser("status"); purge=sub.add_parser("purge");purge.add_argument("--retention-days",type=int,default=7);purge.add_argument("--dry-run",action="store_true");purge.add_argument("--all-terminal",action="store_true")
+    sub.add_parser("status"); show=sub.add_parser("show");show.add_argument("job_id"); purge=sub.add_parser("purge");purge.add_argument("--retention-days",type=int,default=7);purge.add_argument("--dry-run",action="store_true");purge.add_argument("--all-terminal",action="store_true")
     a=p.parse_args();root=Path(a.root).resolve()
     if a.command=="status": value={"runtimeRoot":str(runtime_root(root)),"jobs":[safe(job) for _,job in jobs(root)]}
+    elif a.command=="show":
+        matches=[job for _,job in jobs(root) if job.get("id")==a.job_id]
+        if not matches: print(json.dumps({"error":"job not found"}),file=sys.stderr);return 1
+        job=matches[0]; result=job.get("result") if isinstance(job.get("result"),dict) else {}
+        value={"job":safe(job),"reviewCandidates":result.get("reviewCandidates",[])}
     else:
         cutoff=dt.datetime.now(dt.timezone.utc).timestamp()-a.retention_days*86400; removed=[]
         for path,job in jobs(root):

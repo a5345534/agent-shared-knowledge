@@ -124,7 +124,12 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       state,
       error: undefined,
       payload: undefined,
-      result: { candidateCount: candidates.length, materializer: result.mode, written: result.written },
+      result: {
+        candidateCount: candidates.length,
+        materializer: result.mode,
+        written: result.written,
+        reviewCandidates: result.mode === "review" ? candidates : undefined,
+      },
     });
     const detail = result.mode === "review"
       ? `${candidates.length} background candidate(s) ready for review; checkout unchanged`

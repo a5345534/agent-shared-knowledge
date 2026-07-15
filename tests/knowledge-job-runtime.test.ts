@@ -27,7 +27,9 @@ test("queue persists private idempotent jobs and redacts status", () => {
   assert.equal(queue.list().length, 1);
   assertPrivateMode(queue.root);
   assertPrivateMode(join(queue.jobsDir, `${first.job.id}.json`));
+  queue.update(first.job.id, { result: { candidateCount: 1, materializer: "review", written: [], reviewCandidates: [{ body: "private candidate" }] } });
   assert.equal("payload" in queue.status()[0], false);
+  assert.equal(JSON.stringify(queue.status()).includes("private candidate"), false);
   assert.equal(readFileSync(join(queue.jobsDir, `${first.job.id}.json`), "utf8").includes("Authorization"), false);
 });
 

@@ -318,6 +318,7 @@ authorization headers are never persisted.
 
 ```bash
 knowledge-jobs --root . status
+knowledge-jobs --root . show <job-id>   # explicit review-candidate detail
 knowledge-jobs --root . purge --retention-days 7 --dry-run
 knowledge-jobs --root . purge --retention-days 7
 ```

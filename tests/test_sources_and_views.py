@@ -75,6 +75,16 @@ def test_job_status_redacts_payload_and_purge_is_bounded(tmp_path: Path, monkeyp
     assert (root / "knowledge/facts/workspace/rule.md").exists()
 
 
+def test_excluded_only_git_change_is_noop_and_advances_collection_cursor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = git_workspace(tmp_path, monkeypatch); source = sources.read_sources(root)[0]
+    first = sources.collect_git(root, source); sources.acknowledge(root, source["id"], first["runId"])
+    (root / "package-lock.json").write_text("{}\n"); git(root, "add", "package-lock.json"); git(root, "commit", "-m", "lock only")
+    second = sources.collect_git(root, source, enqueue=True)
+    assert second["status"] == "noop" and "jobId" not in second
+    state = sources.source_state(root, source["id"])
+    assert state["cursor"]["gitHead"] == git(root, "rev-parse", "HEAD") and "pending" not in state
+
+
 def test_source_path_confinement_and_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root = git_workspace(tmp_path, monkeypatch)
     first = sources.collect_git(root, sources.read_sources(root)[0])
@@ -101,6 +111,9 @@ def test_derived_view_is_labeled_snapshotted_and_noop(tmp_path: Path, monkeypatc
     second = views.update_view(root, views.DEFAULT_VIEW, result_file)
     assert second["changed"] is False
     assert (root / views.DEFAULT_VIEW / views.METADATA_FILE).read_text() == metadata_before
+    result_file.write_text(json.dumps({"pages": [{"path": "replacement.md", "title": "Replacement", "body": "A replacement derived page."}]}))
+    views.update_view(root, views.DEFAULT_VIEW, result_file)
+    assert not page.exists() and (root / views.DEFAULT_VIEW / "replacement.md").exists()
 
 
 def test_derived_path_guards_and_openwiki_collision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

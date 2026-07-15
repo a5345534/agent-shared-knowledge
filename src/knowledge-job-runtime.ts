@@ -44,7 +44,7 @@ export type KnowledgeJob = {
   nextAttemptAt?: string;
   modelHint?: string;
   error?: string;
-  result?: { candidateCount: number; materializer: "review" | "inbox" | "command"; written: string[] };
+  result?: { candidateCount: number; materializer: "review" | "inbox" | "command"; written: string[]; reviewCandidates?: Array<Record<string, unknown>> };
   payload?: CapturedPayload;
 };
 
@@ -254,8 +254,12 @@ export class KnowledgeJobQueue {
     });
   }
 
-  status(): Array<Omit<KnowledgeJob, "payload"> & { hasPayload: boolean }> {
-    return this.list().map(({ payload, ...job }) => ({ ...job, hasPayload: Boolean(payload) }));
+  status(): Array<Omit<KnowledgeJob, "payload" | "result"> & { hasPayload: boolean; result?: Omit<NonNullable<KnowledgeJob["result"]>, "reviewCandidates"> }> {
+    return this.list().map(({ payload, result, ...job }) => ({
+      ...job,
+      hasPayload: Boolean(payload),
+      result: result ? { candidateCount: result.candidateCount, materializer: result.materializer, written: result.written } : undefined,
+    }));
   }
 
   cleanup({ dryRun = false, now = Date.now() }: { dryRun?: boolean; now?: number } = {}): string[] {
