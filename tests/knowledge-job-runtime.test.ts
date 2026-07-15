@@ -29,6 +29,7 @@ test("queue persists private idempotent jobs and redacts status", () => {
   assertPrivateMode(join(queue.jobsDir, `${first.job.id}.json`));
   queue.update(first.job.id, { result: { candidateCount: 1, materializer: "review", written: [], reviewCandidates: [{ body: "private candidate" }] } });
   assert.equal("payload" in queue.status()[0], false);
+  assert.equal(queue.status()[0].sessionId, "session-1");
   assert.equal(JSON.stringify(queue.status()).includes("private candidate"), false);
   assert.equal(readFileSync(join(queue.jobsDir, `${first.job.id}.json`), "utf8").includes("Authorization"), false);
 });
@@ -73,8 +74,10 @@ test("cleanup supports dry run and removal", () => {
   const { root, env } = fixture();
   const queue = new KnowledgeJobQueue(root, { maxPayloadBytes: 2048, retentionDays: 0, maxAttempts: 2, debounceMs: 0, maxBatchJobs: 4 }, env);
   const { job } = queue.enqueue(createCapturedPayload(root, "s", "must preserve this durable decision ".repeat(20), queue.config));
-  queue.update(job.id, { state: "done", payload: undefined });
+  queue.update(job.id, { state: "done" });
   assert.deepEqual(queue.cleanup({ dryRun: true, now: Date.now() + 1000 }), [job.id]);
   assert.deepEqual(queue.cleanup({ now: Date.now() + 1000 }), [job.id]);
-  assert.equal(queue.read(job.id), null);
+  assert.equal(queue.read(job.id)?.payload, undefined);
+  assert.ok(queue.read(job.id)?.purgedAt);
+  assert.equal(queue.enqueue(createCapturedPayload(root, "s", "must preserve this durable decision ".repeat(20), queue.config)).created, false);
 });

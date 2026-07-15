@@ -8,6 +8,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -66,6 +68,11 @@ def safe_page_path(output: Path, relative: str) -> Path:
     return path
 
 
+def evidence_revision(workspace: Path) -> str | None:
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=workspace, text=True, capture_output=True)
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+
+
 def canonical_evidence(workspace: Path) -> dict[str, Any]:
     entries = []
     facts = workspace / "knowledge/facts"
@@ -73,7 +80,7 @@ def canonical_evidence(workspace: Path) -> dict[str, Any]:
         for path in sorted(facts.glob("**/*.md")):
             if path.name in {"README.md", "MEMORY.md"}: continue
             entries.append({"path": path.relative_to(workspace).as_posix(), "content": path.read_text(encoding="utf-8")[:50_000]})
-    return {"canonicalFacts": entries, "repositoryReadme": (workspace / "README.md").read_text(encoding="utf-8")[:100_000] if (workspace / "README.md").exists() else ""}
+    return {"canonicalFacts": entries, "repositoryReadme": (workspace / "README.md").read_text(encoding="utf-8")[:100_000] if (workspace / "README.md").exists() else "", "evidenceRevision": evidence_revision(workspace)}
 
 
 def call_model(evidence: dict[str, Any]) -> dict[str, Any]:
@@ -145,9 +152,17 @@ def update_view(workspace: Path, configured: str, response_file: Path | None) ->
         written.append(relative)
     after = snapshot(output); changed = before != after
     if changed:
-        (output / METADATA_FILE).write_text(json.dumps({"version": VERSION, "updatedAt": now(), "model": os.environ.get("SHARED_KNOWLEDGE_VIEW_MODEL", "response-file" if response_file else "configured"), "contentSnapshot": after}, indent=2) + "\n", encoding="utf-8")
+        (output / METADATA_FILE).write_text(json.dumps({"version": VERSION, "updatedAt": now(), "model": os.environ.get("SHARED_KNOWLEDGE_VIEW_MODEL", "response-file" if response_file else "configured"), "evidenceRevision": evidence.get("evidenceRevision"), "contentSnapshot": after}, indent=2) + "\n", encoding="utf-8")
     gaps = write_gaps(workspace, result.get("gaps", []) if isinstance(result.get("gaps", []), list) else [], f"derived-view-snapshot:{after}")
     return {"changed": changed, "snapshot": after, "written": written, "gapCandidates": gaps, "output": str(output.relative_to(workspace))}
+
+
+def guidance_target(workspace: Path, configured: str) -> Path:
+    if Path(configured).is_absolute(): raise ValueError("guidance path must be workspace-relative")
+    target = (workspace / configured).resolve()
+    if not within(target, workspace): raise ValueError("guidance path escapes workspace")
+    if target.exists() and target.is_symlink(): raise ValueError("guidance path must not be a symlink")
+    return target
 
 
 def managed_section(path: Path, content: str, dry_run: bool) -> dict[str, Any]:
@@ -180,7 +195,7 @@ def main() -> int:
         elif args.command == "guidance":
             files = args.file or ["AGENTS.md"]
             content = "## Shared Knowledge Views\n\nCanonical facts are under `knowledge/facts/` and are retrieved through deterministic B1/B2/B3 injection. Optional navigation pages under `knowledge/views/wiki/` are generated, derived, and non-authoritative."
-            value = [managed_section(root / name, content, args.dry_run) for name in files]
+            value = [managed_section(guidance_target(root, name), content, args.dry_run) for name in files]
         else:
             path = root / ".github/workflows/shared-knowledge-maintenance.yml"; changed = not path.exists() or path.read_text(encoding="utf-8") != workflow_text()
             if changed and not args.dry_run: path.parent.mkdir(parents=True, exist_ok=True); path.write_text(workflow_text(), encoding="utf-8")

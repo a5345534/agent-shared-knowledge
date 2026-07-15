@@ -15,6 +15,7 @@
           "type": { "const": "git" }, "enabled": { "type": "boolean" }, "path": { "type": "string" },
           "exclude": { "type": "array", "items": { "type": "string" } }
         },
+        "patternProperties": { "(_env|_env_key|EnvKey)$": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,127}$" } },
         "additionalProperties": false
       }
     }

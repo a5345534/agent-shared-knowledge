@@ -17,7 +17,7 @@ def jobs(root: Path) -> list[tuple[Path, dict]]:
     return result
 
 def safe(job: dict) -> dict:
-    value = {key:job.get(key) for key in ("id","state","createdAt","updatedAt","attempts","nextAttemptAt","modelHint","error") if job.get(key) is not None}
+    value = {key:job.get(key) for key in ("id","state","createdAt","updatedAt","attempts","nextAttemptAt","modelHint","sessionId","sourceInstance","purgedAt","error") if job.get(key) is not None}
     result = job.get("result")
     if isinstance(result, dict):
         value["result"] = {key: result.get(key) for key in ("candidateCount", "materializer", "written") if result.get(key) is not None}
@@ -39,9 +39,16 @@ def main()->int:
             timestamp=job.get("updatedAt") or job.get("createdAt") or ""
             try: old=dt.datetime.fromisoformat(timestamp.replace("Z","+00:00")).timestamp()<=cutoff
             except ValueError: old=False
-            if job.get("state") in TERMINAL and (a.all_terminal or old):
+            result = job.get("result") if isinstance(job.get("result"), dict) else {}
+            has_private_detail = bool(job.get("payload")) or bool(result.get("reviewCandidates"))
+            if job.get("state") in TERMINAL and has_private_detail and (a.all_terminal or old):
                 removed.append(job.get("id",path.stem))
-                if not a.dry_run:path.unlink(missing_ok=True)
+                if not a.dry_run:
+                    job["payload"] = None; result.pop("reviewCandidates", None); job["result"] = result or None
+                    job["purgedAt"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+                    job["updatedAt"] = job["purgedAt"]
+                    from knowledge_sources import atomic_json
+                    atomic_json(path, job)
         value={"removed":removed,"dryRun":a.dry_run,"retentionDays":a.retention_days}
     print(json.dumps(value,ensure_ascii=False,indent=2));return 0
 if __name__=="__main__":raise SystemExit(main())

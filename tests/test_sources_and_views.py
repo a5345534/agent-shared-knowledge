@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import knowledge_compact_producer as producer
 import knowledge_jobs as jobs_cli
 import knowledge_sources as sources
 import knowledge_views as views
@@ -35,6 +36,9 @@ def test_source_instances_reject_secrets_and_are_independent(tmp_path: Path, mon
     config = {"version": 1, "sources": [{"id": "one", "type": "git", "path": "."}, {"id": "two", "type": "git", "path": "."}]}
     (root / sources.DEFAULT_CONFIG).write_text(json.dumps(config), encoding="utf-8")
     assert [item["id"] for item in sources.read_sources(root)] == ["one", "two"]
+    config["sources"][0]["api_key_env"] = "SOURCE_API_KEY"
+    (root / sources.DEFAULT_CONFIG).write_text(json.dumps(config), encoding="utf-8")
+    assert sources.read_sources(root)[0]["api_key_env"] == "SOURCE_API_KEY"
     config["sources"][0]["api_key"] = "secret"
     (root / sources.DEFAULT_CONFIG).write_text(json.dumps(config), encoding="utf-8")
     with pytest.raises(ValueError, match="secret value"):
@@ -85,12 +89,23 @@ def test_excluded_only_git_change_is_noop_and_advances_collection_cursor(tmp_pat
     assert state["cursor"]["gitHead"] == git(root, "rev-parse", "HEAD") and "pending" not in state
 
 
+def test_headless_producer_preserves_source_provenance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = git_workspace(tmp_path, monkeypatch)
+    monkeypatch.setattr(producer, "call_llm", lambda _config, _prompt: {"candidates": [{"name": "Durable Git Policy", "description": "Policy derived from Git evidence.", "type": "reference", "suggested_scope": "workspace", "body": "This durable policy was derived from bounded Git evidence.", "reason": "Persist across sessions", "candidate_id": "durable-git-policy"}]})
+    result = producer.produce(root, [{"content": "evidence"}], {"enabled": True, "api_key": "test"}, {"capture_source": "source:git-default", "source_instance": "git-default", "source_run_id": "run-1", "evidence_snapshot": "abc", "source_revision": "def", "evidence_paths": ["source://git-default/run-1/git-evidence.json"]})
+    text = (root / result["candidates"][0]).read_text()
+    assert "source_instance: \"git-default\"" in text
+    assert "source://git-default/run-1/git-evidence.json" in text
+
+
 def test_source_path_confinement_and_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root = git_workspace(tmp_path, monkeypatch)
     first = sources.collect_git(root, sources.read_sources(root)[0])
     raw = Path(first["rawFiles"][0]).parent
     old = raw.stat().st_mtime
     os.utime(raw, (old - 10 * 86400, old - 10 * 86400))
+    assert sources.cleanup(root, 7, True) == []  # pending evidence is retained for retry
+    sources.acknowledge(root, "git-default", first["runId"])
     assert sources.cleanup(root, 7, True)
     assert raw.exists()
     sources.cleanup(root, 7, False)
@@ -108,6 +123,7 @@ def test_derived_view_is_labeled_snapshotted_and_noop(tmp_path: Path, monkeypatc
     assert first["changed"] is True
     assert "authority: derived" in page.read_text()
     metadata_before = (root / views.DEFAULT_VIEW / views.METADATA_FILE).read_text()
+    assert json.loads(metadata_before)["evidenceRevision"] == git(root, "rev-parse", "HEAD")
     second = views.update_view(root, views.DEFAULT_VIEW, result_file)
     assert second["changed"] is False
     assert (root / views.DEFAULT_VIEW / views.METADATA_FILE).read_text() == metadata_before
@@ -137,6 +153,8 @@ def test_managed_guidance_preserves_content_and_rejects_malformed(tmp_path: Path
     path.write_text(path.read_text() + views.START)
     with pytest.raises(ValueError, match="malformed"):
         views.managed_section(path, "bad", False)
+    with pytest.raises(ValueError, match="escapes"):
+        views.guidance_target(tmp_path, "../outside.md")
 
 
 def test_generated_pages_are_outside_canonical_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

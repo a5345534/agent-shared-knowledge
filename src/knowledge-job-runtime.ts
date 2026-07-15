@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -7,7 +6,6 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -43,6 +41,9 @@ export type KnowledgeJob = {
   attempts: number;
   nextAttemptAt?: string;
   modelHint?: string;
+  sessionId?: string;
+  sourceInstance?: string;
+  purgedAt?: string;
   error?: string;
   result?: { candidateCount: number; materializer: "review" | "inbox" | "command"; written: string[]; reviewCandidates?: Array<Record<string, unknown>> };
   payload?: CapturedPayload;
@@ -88,16 +89,21 @@ export function resolveRuntimeRoot(cwd: string, env: NodeJS.ProcessEnv = process
   if (env.SHARED_KNOWLEDGE_RUNTIME_DIR) {
     return resolve(env.SHARED_KNOWLEDGE_RUNTIME_DIR, safeWorkspaceKey(cwd));
   }
-  try {
-    const gitPath = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-path", "shared-knowledge"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 2000,
-    }).trim();
-    if (gitPath) return resolve(gitPath);
-  } catch {
-    // Fall through to XDG state.
+  let current = resolve(cwd);
+  while (true) {
+    const marker = join(current, ".git");
+    if (existsSync(marker)) {
+      try {
+        const value = readFileSync(marker, "utf8").trim();
+        const match = /^gitdir:\s*(.+)$/i.exec(value);
+        if (match) return join(resolve(current, match[1]), "shared-knowledge");
+      } catch {
+        return join(marker, "shared-knowledge");
+      }
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
   }
   const stateHome = env.XDG_STATE_HOME || join(homedir(), ".local", "state");
   return join(stateHome, "shared-knowledge", safeWorkspaceKey(cwd));
@@ -192,6 +198,8 @@ export class KnowledgeJobQueue {
       updatedAt: now,
       attempts: 0,
       modelHint,
+      sessionId: payload.sessionId,
+      sourceInstance: payload.source?.instanceId,
       payload,
     };
     atomicJson(this.path(id), job);
@@ -265,13 +273,17 @@ export class KnowledgeJobQueue {
   cleanup({ dryRun = false, now = Date.now() }: { dryRun?: boolean; now?: number } = {}): string[] {
     const cutoff = now - this.config.retentionDays * 86_400_000;
     const terminal = new Set<JobState>(["done", "review-ready", "skipped", "failed"]);
-    const removed: string[] = [];
+    const purged: string[] = [];
     for (const job of this.list()) {
-      if (!terminal.has(job.state) || Date.parse(job.updatedAt) > cutoff) continue;
-      removed.push(job.id);
-      if (!dryRun) rmSync(this.path(job.id), { force: true });
+      if (!terminal.has(job.state) || Date.parse(job.updatedAt) > cutoff || (!job.payload && !job.result?.reviewCandidates)) continue;
+      purged.push(job.id);
+      if (!dryRun) this.update(job.id, {
+        payload: undefined,
+        purgedAt: new Date(now).toISOString(),
+        result: job.result ? { ...job.result, reviewCandidates: undefined } : undefined,
+      });
     }
-    return removed;
+    return purged;
   }
 
   recoverRunning(): number {

@@ -81,7 +81,9 @@ def validate_safe_config(value: Any, prefix: str = "") -> list[str]:
     if isinstance(value, dict):
         for key, item in value.items():
             location = f"{prefix}.{key}" if prefix else str(key)
-            if SECRET_RE.search(str(key)) and item not in (None, ""):
+            key_text = str(key)
+            env_reference = key_text.lower().endswith(("_env", "_env_key", "envkey")) and isinstance(item, str) and bool(re.fullmatch(r"[A-Z][A-Z0-9_]{1,127}", item))
+            if SECRET_RE.search(key_text) and item not in (None, "") and not env_reference:
                 errors.append(f"secret value is not allowed at {location}; store only an env-var reference")
             errors.extend(validate_safe_config(item, location))
     elif isinstance(value, list):
@@ -155,7 +157,7 @@ def collect_git(workspace: Path, source: dict[str, Any], enqueue: bool = False) 
     evidence = {"repository": str(repo), "previousHead": previous or None, "currentHead": head, "fallback": fallback,
                 "status": status[:100_000], "gitLog": log[:200_000], "changedPaths": paths}
     snapshot = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
-    run_id = now().replace(":", "-")
+    run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     raw_dir = source_dir(workspace, source_id) / "raw" / run_id
     private_dir(raw_dir)
     evidence_path = raw_dir / "git-evidence.json"
@@ -194,7 +196,7 @@ def enqueue_manifest(root: Path, manifest: dict[str, Any], evidence: dict[str, A
     digest = hashlib.sha256(json.dumps(stable, separators=(",", ":")).encode()).hexdigest()
     job_id = digest[:24]
     job = {"version": VERSION, "id": job_id, "payloadHash": digest, "state": "pending", "createdAt": now(),
-           "updatedAt": now(), "attempts": 0, "payload": payload}
+           "updatedAt": now(), "attempts": 0, "sessionId": payload["sessionId"], "sourceInstance": manifest["sourceId"], "payload": payload}
     path = runtime_root(root) / "jobs" / f"{job_id}.json"
     if not path.exists():
         atomic_json(path, job)
@@ -227,6 +229,8 @@ def acknowledge(root: Path, source_id: str, run_id: str) -> dict[str, Any]:
     state = load_json(state_path, {})
     pending = state.get("pending", {})
     if pending.get("runId") != run_id:
+        if state.get("cursor") and any(item.get("runId") == run_id for item in state.get("runs", [])):
+            return {"sourceId": source_id, "runId": run_id, "cursor": state["cursor"], "snapshot": state.get("snapshot"), "alreadyAcknowledged": True}
         raise ValueError(f"run is not pending for {source_id}: {run_id}")
     state["cursor"] = {"gitHead": pending["gitHead"]}
     state["snapshot"] = pending["snapshot"]
@@ -249,7 +253,9 @@ def cleanup(root: Path, retention_days: int, dry_run: bool) -> list[str]:
     sources_root = runtime_root(root) / "sources"
     if not sources_root.exists(): return removed
     for raw in sources_root.glob("*/raw/*"):
-        if raw.is_dir() and raw.stat().st_mtime < cutoff:
+        state = source_state(root, raw.parent.parent.name)
+        pending_run = state.get("pending", {}).get("runId")
+        if raw.is_dir() and raw.name != pending_run and raw.stat().st_mtime < cutoff:
             removed.append(str(raw))
             if not dry_run: shutil.rmtree(raw)
     return removed
