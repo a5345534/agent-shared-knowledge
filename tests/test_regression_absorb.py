@@ -236,6 +236,24 @@ class TestAbsorbRegression:
         monkeypatch.setenv("TEST_VAR", "77")
         assert ka.env_int("TEST_VAR", 0) == 77
 
+    def test_rebuild_query_index_uses_package_sibling_script(self, workspace, monkeypatch):
+        """Package-mode absorption rebuilds an adopter index without workspace scripts."""
+        assert not (workspace / "scripts" / "knowledge_query.py").exists()
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+        monkeypatch.setattr(ka, "run", fake_run)
+        ka._rebuild_query_index(workspace)
+
+        assert len(calls) == 1
+        args, kwargs = calls[0]
+        assert Path(args[1]) == Path(ka.__file__).resolve().with_name("knowledge_query.py")
+        assert args[2:] == ["--root", str(workspace), "rebuild-index"]
+        assert kwargs["cwd"] == workspace
+
 
 # ---------------------------------------------------------------------------
 # Absorb CLI regression tests
