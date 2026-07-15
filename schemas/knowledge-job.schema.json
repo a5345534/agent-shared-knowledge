@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "knowledge-job.schema.json",
+  "type": "object",
+  "required": ["version", "id", "payloadHash", "state", "createdAt", "updatedAt", "attempts"],
+  "properties": {
+    "version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-f0-9]{24}$" },
+    "payloadHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "state": { "enum": ["pending", "running", "retry-wait", "review-ready", "done", "skipped", "failed"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "attempts": { "type": "integer", "minimum": 0 },
+    "error": { "type": "string", "maxLength": 500 },
+    "payload": { "$ref": "#/$defs/payload" }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "payload": {
+      "type": "object",
+      "required": ["version", "workspace", "sessionId", "capturedAt", "conversation", "truncated", "originalBytes"],
+      "properties": {
+        "version": { "const": 1 }, "workspace": { "type": "string" }, "sessionId": { "type": "string" },
+        "capturedAt": { "type": "string", "format": "date-time" }, "conversation": { "type": "string" },
+        "truncated": { "type": "boolean" }, "originalBytes": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -15,6 +15,15 @@ def main() -> int:
     package = json.loads((ROOT / "package.json").read_text())
     if package.get("version") != "0.1.1":
         print("release version must be 0.1.1", file=sys.stderr); return 1
+    required_bins = {"knowledge-jobs", "knowledge-source", "knowledge-view"}
+    if not required_bins.issubset(package.get("bin", {})):
+        print("background/source/view CLI bins are missing", file=sys.stderr); return 1
+    extension = (ROOT / ".pi/extensions/shared-knowledge-lifecycle.ts").read_text()
+    capture = extension.split('pi.on("session_before_compact"', 1)[-1].split('pi.on("session_compact"', 1)[0]
+    if "complete(" in capture or "getApiKeyAndHeaders" in capture:
+        print("pre-compaction capture contains awaited model/provider work", file=sys.stderr); return 1
+    for schema in ("knowledge-job.schema.json", "evidence-source.schema.json", "evidence-manifest.schema.json", "derived-view-response.schema.json"):
+        json.loads((ROOT / "schemas" / schema).read_text())
     status = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, text=True, capture_output=True, check=True).stdout
     if status:
         print("release checkout is not clean", file=sys.stderr); return 1

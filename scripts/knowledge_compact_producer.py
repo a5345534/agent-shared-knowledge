@@ -493,6 +493,11 @@ def build_parser() -> argparse.ArgumentParser:
     stdin_parser = subparsers.add_parser("produce-stdin", help="Read session context from stdin and produce candidates")
     stdin_parser.add_argument("--format", choices=("text", "json"), default="json")
 
+    # produce-job — compatibility path for versioned private queue payloads
+    job_parser = subparsers.add_parser("produce-job", help="Read a versioned knowledge-job JSON file")
+    job_parser.add_argument("--job-file", required=True, help="Path to a private versioned job JSON file")
+    job_parser.add_argument("--format", choices=("text", "json"), default="json")
+
     # check — validate configuration
     subparsers.add_parser("check", help="Check configuration readiness without calling LLM")
 
@@ -510,8 +515,20 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    # produce or produce-stdin
-    if args.command == "produce":
+    # produce, produce-job, or produce-stdin
+    if args.command == "produce-job":
+        job_path = Path(args.job_file)
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            payload = job.get("payload", {})
+            if job.get("version") != 1 or payload.get("version") != 1 or not isinstance(payload.get("conversation"), str):
+                raise ValueError("unsupported or invalid queued job payload")
+            context = [{"role": "captured-context", "content": payload["conversation"], "sessionId": payload.get("sessionId", "")}]
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            print(json.dumps({"version": PRODUCER_VERSION, "generatedAt": now_iso(), "candidatesWritten": 0,
+                              "candidates": [], "skipped": [], "errors": [f"failed to read job file: {exc}"]}, ensure_ascii=False, indent=2))
+            return 0
+    elif args.command == "produce":
         context_path = Path(args.context_file)
         if not context_path.exists():
             print(json.dumps({
@@ -535,7 +552,7 @@ def main() -> int:
                 "errors": [f"failed to read context file: {exc}"],
             }, ensure_ascii=False, indent=2))
             return 0
-    else:  # produce-stdin
+    elif args.command == "produce-stdin":
         try:
             raw = sys.stdin.read()
             if not raw.strip():
