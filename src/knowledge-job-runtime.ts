@@ -55,6 +55,7 @@ export type QueueConfig = {
   maxAttempts: number;
   debounceMs: number;
   maxBatchJobs: number;
+  timeoutMs?: number;
   excludePatterns?: string[];
 };
 
@@ -76,6 +77,7 @@ export function parseQueueConfig(env: NodeJS.ProcessEnv = process.env): QueueCon
     maxAttempts: integer("SHARED_KNOWLEDGE_JOB_MAX_ATTEMPTS", 3, 1),
     debounceMs: integer("SHARED_KNOWLEDGE_JOB_DEBOUNCE_MS", 3000, 0),
     maxBatchJobs: integer("SHARED_KNOWLEDGE_MAX_BATCH_JOBS", 4, 1),
+    timeoutMs: integer("SHARED_KNOWLEDGE_JOB_TIMEOUT_MS", 120_000, 1000),
     excludePatterns,
   };
 }

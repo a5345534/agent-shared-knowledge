@@ -329,6 +329,7 @@ knowledge-jobs --root . purge --retention-days 7
 | `SHARED_KNOWLEDGE_JOB_DEBOUNCE_MS` | `3000` | Idle debounce before extraction |
 | `SHARED_KNOWLEDGE_EXTRACTION_MODEL` | active Pi model | Optional `provider/model-id` override |
 | `SHARED_KNOWLEDGE_JOB_MAX_ATTEMPTS` | `3` | Bounded attempts |
+| `SHARED_KNOWLEDGE_JOB_TIMEOUT_MS` | `120000` | Per-attempt background model timeout |
 | `SHARED_KNOWLEDGE_MAX_BATCH_JOBS` | `4` | Same-session pending jobs per extraction batch |
 | `SHARED_KNOWLEDGE_MAX_JOB_BYTES` | `2097152` | Maximum normalized session payload |
 | `SHARED_KNOWLEDGE_EXCLUDE_PATTERNS` | `[]` | JSON string array of lines to omit before capture |

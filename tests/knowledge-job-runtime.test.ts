@@ -9,12 +9,19 @@ import {
   createCapturedPayload,
   isMeaningfulConversation,
   normalizeConversation,
+  parseQueueConfig,
 } from "../src/knowledge-job-runtime.ts";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "knowledge-jobs-"));
   return { root, env: { ...process.env, SHARED_KNOWLEDGE_RUNTIME_DIR: join(root, "runtime") } };
 }
+
+test("queue configuration applies bounded timeout and batching", () => {
+  const config = parseQueueConfig({ SHARED_KNOWLEDGE_JOB_TIMEOUT_MS: "5000", SHARED_KNOWLEDGE_MAX_BATCH_JOBS: "2" });
+  assert.equal(config.timeoutMs, 5000);
+  assert.equal(config.maxBatchJobs, 2);
+});
 
 test("queue persists private idempotent jobs and redacts status", () => {
   const { root, env } = fixture();

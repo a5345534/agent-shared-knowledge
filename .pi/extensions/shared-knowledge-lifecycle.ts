@@ -87,13 +87,21 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       throw new Error(`Credentials unavailable for ${model.id}`);
     }
     queue.update(job.id, { state: "running", modelHint: model.id, error: undefined });
-    const response = await complete(model, {
-      messages: [{
-        role: "user",
-        content: [{ type: "text", text: `${promptText()}\n\nReview this conversation:\n\n${job.payload.conversation}` }],
-        timestamp: Date.now(),
-      }],
-    }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: 4096 });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error("Background extraction timed out")), queue.config.timeoutMs ?? 120_000);
+    timeout.unref();
+    let response: Awaited<ReturnType<typeof complete>>;
+    try {
+      response = await complete(model, {
+        messages: [{
+          role: "user",
+          content: [{ type: "text", text: `${promptText()}\n\nReview this conversation:\n\n${job.payload.conversation}` }],
+          timestamp: Date.now(),
+        }],
+      }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: 4096, signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
 
     let parsed: { candidates?: Candidate[] };
     try {
