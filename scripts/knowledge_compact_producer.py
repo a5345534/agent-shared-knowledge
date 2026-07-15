@@ -337,13 +337,20 @@ def render_candidate(candidate: dict[str, Any]) -> str:
         f"suggested_scope: {scope}",
         f"candidate_id: {candidate_id}",
         f"captured_at: {dt.date.today().isoformat()}",
-        f"capture_source: agent:compact-producer",
-        f"source: agent:compact-producer",
+        f"capture_source: {candidate.get('capture_source', 'agent:compact-producer')}",
+        f"source: {candidate.get('capture_source', 'agent:compact-producer')}",
         f"reason: {format_frontmatter_value(reason)}",
+    ]
+    for key in ("source_instance", "source_run_id", "evidence_snapshot", "source_revision"):
+        if candidate.get(key): lines.append(f"{key}: {format_frontmatter_value(candidate[key])}")
+    if isinstance(candidate.get("evidence_paths"), list):
+        lines.append("evidence_paths:")
+        lines.extend(f"  - {format_frontmatter_value(item)}" for item in candidate["evidence_paths"])
+    lines.extend([
         "---",
         "",
         body,
-    ]
+    ])
     if evidence:
         lines.extend(["", "## Evidence", ""])
         lines.extend(f"- {item}" for item in evidence)
@@ -355,7 +362,7 @@ def render_candidate(candidate: dict[str, Any]) -> str:
 # Core production logic
 # ---------------------------------------------------------------------------
 
-def produce(root: Path, context: list[Any], config: dict[str, Any]) -> dict[str, Any]:
+def produce(root: Path, context: list[Any], config: dict[str, Any], provenance: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run the production pipeline: LLM review → validate → write candidates.
 
     Returns a summary dict with keys:
@@ -432,6 +439,8 @@ def produce(root: Path, context: list[Any], config: dict[str, Any]) -> dict[str,
         if not isinstance(candidate, dict):
             skipped.append(f"candidate[{idx}]: not a dict")
             continue
+        if provenance:
+            candidate = {**candidate, **provenance}
 
         # Validate
         validation_errors = validate_candidate(candidate)
@@ -493,6 +502,11 @@ def build_parser() -> argparse.ArgumentParser:
     stdin_parser = subparsers.add_parser("produce-stdin", help="Read session context from stdin and produce candidates")
     stdin_parser.add_argument("--format", choices=("text", "json"), default="json")
 
+    # produce-job — compatibility path for versioned private queue payloads
+    job_parser = subparsers.add_parser("produce-job", help="Read a versioned knowledge-job JSON file")
+    job_parser.add_argument("--job-file", required=True, help="Path to a private versioned job JSON file")
+    job_parser.add_argument("--format", choices=("text", "json"), default="json")
+
     # check — validate configuration
     subparsers.add_parser("check", help="Check configuration readiness without calling LLM")
 
@@ -504,14 +518,32 @@ def main() -> int:
     root = find_workspace_root(Path(args.root))
 
     config = load_config()
+    provenance: dict[str, Any] | None = None
 
     if args.command == "check":
         result = check_config(config)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    # produce or produce-stdin
-    if args.command == "produce":
+    # produce, produce-job, or produce-stdin
+    if args.command == "produce-job":
+        job_path = Path(args.job_file)
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            payload = job.get("payload", {})
+            if job.get("version") != 1 or payload.get("version") != 1 or not isinstance(payload.get("conversation"), str):
+                raise ValueError("unsupported or invalid queued job payload")
+            context = [{"role": "captured-context", "content": payload["conversation"], "sessionId": payload.get("sessionId", "")}]
+            source = payload.get("source") if isinstance(payload.get("source"), dict) else None
+            if source:
+                provenance = {"capture_source": f"source:{source.get('instanceId', 'unknown')}", "source_instance": source.get("instanceId"),
+                              "source_run_id": source.get("runId"), "evidence_snapshot": source.get("snapshot"),
+                              "source_revision": source.get("revision"), "evidence_paths": source.get("evidencePaths", [])}
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            print(json.dumps({"version": PRODUCER_VERSION, "generatedAt": now_iso(), "candidatesWritten": 0,
+                              "candidates": [], "skipped": [], "errors": [f"failed to read job file: {exc}"]}, ensure_ascii=False, indent=2))
+            return 0
+    elif args.command == "produce":
         context_path = Path(args.context_file)
         if not context_path.exists():
             print(json.dumps({
@@ -535,7 +567,7 @@ def main() -> int:
                 "errors": [f"failed to read context file: {exc}"],
             }, ensure_ascii=False, indent=2))
             return 0
-    else:  # produce-stdin
+    elif args.command == "produce-stdin":
         try:
             raw = sys.stdin.read()
             if not raw.strip():
@@ -556,7 +588,7 @@ def main() -> int:
     if not isinstance(context, list):
         context = [context]
 
-    result = produce(root, context, config)
+    result = produce(root, context, config, provenance)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

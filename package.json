@@ -12,7 +12,10 @@
   "bin": {
     "knowledge-absorb": "./bin/knowledge-absorb",
     "knowledge-lint": "./bin/knowledge-lint",
-    "knowledge-query": "./bin/knowledge-query"
+    "knowledge-query": "./bin/knowledge-query",
+    "knowledge-jobs": "./bin/knowledge-jobs",
+    "knowledge-source": "./bin/knowledge-source",
+    "knowledge-view": "./bin/knowledge-view"
   },
   "files": [
     ".pi/extensions",
@@ -34,7 +37,7 @@
     "lint": "python3 scripts/knowledge_lint.py",
     "query": "python3 scripts/knowledge_query.py",
     "test": "python3 -m pytest -q && npm run test:materializer",
-    "test:materializer": "tsx --test tests/pi-lifecycle-materializer.test.ts",
+    "test:materializer": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "package:smoke": "npm pack --dry-run",
     "release:smoke": "python3 scripts/release_smoke.py"

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evidence-manifest.schema.json",
+  "type": "object",
+  "required": ["version", "sourceId", "sourceType", "runId", "collectedAt", "snapshot", "status", "rawFiles", "proposedCursor"],
+  "properties": {
+    "version": { "const": 1 },
+    "sourceId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$" },
+    "sourceType": { "const": "git" },
+    "runId": { "type": "string" },
+    "collectedAt": { "type": "string", "format": "date-time" },
+    "snapshot": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "priorSnapshot": { "type": ["string", "null"] },
+    "status": { "enum": ["success", "noop", "error"] },
+    "warnings": { "type": "array", "items": { "type": ["string", "null"] } },
+    "rawFiles": { "type": "array", "items": { "type": "string" } },
+    "proposedCursor": { "type": "object", "required": ["gitHead"], "properties": { "gitHead": { "type": "string" } }, "additionalProperties": false },
+    "jobId": { "type": "string", "pattern": "^[a-f0-9]{24}$" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "runSummary": { "type": "object", "required": ["runId", "collectedAt", "snapshot", "status"], "properties": {
+      "runId": { "type": "string" }, "collectedAt": { "type": "string" }, "snapshot": { "type": "string" },
+      "status": { "enum": ["success", "noop", "error"] }, "warnings": { "type": "array" }
+    } },
+    "candidateProvenance": { "type": "object", "required": ["source_instance", "source_run_id", "evidence_snapshot"], "properties": {
+      "source_instance": { "type": "string" }, "source_run_id": { "type": "string" }, "evidence_snapshot": { "type": "string" },
+      "source_revision": { "type": "string" }, "evidence_paths": { "type": "array", "items": { "type": "string", "pattern": "^source://" } }
+    } }
+  }
+}

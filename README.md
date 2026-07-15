@@ -293,25 +293,89 @@ Pi loads one canonical lifecycle extension from either the Pi Package or a thin
 submodule loader installed by `knowledge init`:
 
 ```
-Pi session compact triggers
-  │
-  ├─ session_before_compact
-  │   └─ active Pi model extracts and validates candidates
-  │       ├─ review (default): report only; checkout unchanged
-  │       ├─ inbox (explicit): write knowledge/inbox candidates
-  │       └─ command (explicit): send JSON to adopter materializer
-  │
-  ├─ Pi default compaction
-  │
-  └─ session_compact
-      └─ only in explicit inbox mode: detached absorber
-          └─ knowledge_absorb.py hook --git-mode none
+session_before_compact: normalize + atomically queue (no LLM/network)
+         │
+         ▼
+Pi default compaction ──────────────► user continues
+         │
+         ▼
+session_compact / agent_settled
+         │
+         ▼ background, idle-gated, concurrency 1
+extract → validate → materialize → optional no-git absorb
 ```
 
-The safe default does not materialize, stage, or commit repository files. See
-“Pi lifecycle materialization policy” above to opt into inbox writes or provide
-a worktree/PR materializer. The optional inbox absorber is detached so it does
-not block the session, but it never performs Git integration automatically.
+Candidate extraction no longer adds an awaited LLM call to compaction. Background
+failure is fail-open for the session and fail-closed for canonical mutation. The
+safe default `review` mode leaves the checkout unchanged; explicit `inbox` and
+argv-based `command` materializers retain their existing authority boundaries.
+
+### Background job operations
+
+Runtime payloads are stored outside tracked checkout content (prefer Git-private
+state, otherwise XDG user state), with user-only permissions. Credentials and
+authorization headers are never persisted.
+
+```bash
+knowledge-jobs --root . status
+knowledge-jobs --root . show <job-id>   # explicit review-candidate detail
+knowledge-jobs --root . purge --retention-days 7 --dry-run
+knowledge-jobs --root . purge --retention-days 7
+```
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `SHARED_KNOWLEDGE_ASYNC_EXTRACTION` | `1` | `0` disables automatic extraction; it never restores synchronous LLM work |
+| `SHARED_KNOWLEDGE_JOB_DEBOUNCE_MS` | `3000` | Idle debounce before extraction |
+| `SHARED_KNOWLEDGE_EXTRACTION_MODEL` | active Pi model | Optional `provider/model-id` override |
+| `SHARED_KNOWLEDGE_JOB_MAX_ATTEMPTS` | `3` | Bounded attempts |
+| `SHARED_KNOWLEDGE_JOB_TIMEOUT_MS` | `120000` | Per-attempt background model timeout |
+| `SHARED_KNOWLEDGE_MAX_BATCH_JOBS` | `4` | Same-session pending jobs per extraction batch |
+| `SHARED_KNOWLEDGE_MAX_JOB_BYTES` | `2097152` | Maximum normalized session payload |
+| `SHARED_KNOWLEDGE_EXCLUDE_PATTERNS` | `[]` | JSON string array of lines to omit before capture |
+| `SHARED_KNOWLEDGE_JOB_RETENTION_DAYS` | `7` | Terminal private-payload retention |
+| `SHARED_KNOWLEDGE_RUNTIME_DIR` | Git/XDG state | Private runtime base override |
+
+### Incremental evidence sources
+
+OpenWiki-inspired ingestion separates deterministic collection from LLM
+synthesis. Git is the initial source; raw manifests, cursors, snapshots, and run
+summaries remain private and source text is untrusted evidence. Enqueued
+synthesis can only produce governed candidates.
+
+```bash
+knowledge-source --root . list
+knowledge-source --root . collect git --enqueue
+knowledge-source --root . status
+```
+
+Optional `.shared-knowledge-sources.json`:
+
+```json
+{"version":1,"sources":[{"id":"git-backend","type":"git","path":"backend","enabled":true,"exclude":["knowledge/views/**","*.lock"]}]}
+```
+
+Source configuration rejects secret values. Cursors advance only after the
+queued downstream job succeeds; failures retain the previous evidence window.
+
+### Derived wiki views
+
+OpenWiki-style navigation pages are optional projections, not canonical memory.
+The default `knowledge/views/wiki/` output is excluded from facts scanning and
+B1/B2/B3 injection. Writes are path-confined, pages are labeled
+`authority: derived`, and metadata changes only when page content changes.
+
+```bash
+knowledge-view --root . update
+knowledge-view --root . guidance --file AGENTS.md --file CLAUDE.md --dry-run
+knowledge-view --root . workflow-init --dry-run
+```
+
+Headless generation uses `SHARED_KNOWLEDGE_VIEW_MODEL`,
+`SHARED_KNOWLEDGE_VIEW_BASE_URL`, and `SHARED_KNOWLEDGE_VIEW_API_KEY`. The
+package adapts incremental evidence, snapshots, write guards, managed sections,
+and scheduled review PRs; it does not import OpenWiki/LangChain, and generated
+prose never replaces scoped facts, FTS5 retrieval, or absorption review.
 
 ## Migrating `shared-memory-v1`
 

@@ -47,17 +47,19 @@ via `~/.pi/`. For submodule installations it writes a thin loader at
 canonical extension in the submodule. If project or global Pi settings already
 declare the package, duplicate loader installation is skipped.
 
-- **Producer** (`session_before_compact`): Uses Pi's active model and provider
-  credentials to extract validated candidates. The default `review` mode
-  reports candidates without writing into the checkout.
-- **Materialization**: Explicit `inbox` mode writes candidates locally;
-  explicit `command` mode delegates JSON to an adopter-owned argv without a
-  shell.
-- **Absorber** (`session_compact`): Runs only after explicit inbox
-  materialization and invokes `knowledge_absorb.py hook --git-mode none`.
+- **Capture** (`session_before_compact`): Normalizes and atomically queues the
+  compaction messages without a provider, network, or LLM call.
+- **Worker** (`session_compact` / `agent_settled`): Starts a non-awaited,
+  idle-gated background extraction using Pi's active model credentials.
+- **Materialization**: Default `review` reports candidates without checkout
+  writes; explicit `inbox` writes locally; explicit `command` delegates JSON to
+  adopter-owned argv without a shell.
+- **Absorber**: Runs in the same ordered background pipeline only after
+  successful explicit inbox materialization and uses `--git-mode none`.
 
-Only the optional absorber process is detached. Candidate extraction uses Pi's
-provider API and participates in the cancellable pre-compaction event.
+No shared-knowledge LLM call is awaited by Pi compaction. Pending payloads are
+private and recoverable, credentials are reacquired rather than persisted, and
+an extraction/materialization failure never starts absorption.
 
 Global Pi scope is opt-in:
 
