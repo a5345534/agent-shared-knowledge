@@ -49,6 +49,7 @@ def _candidate_and_target(workspace: Path) -> tuple[Path, Path]:
         description="The existing canonical rule.",
         body="Canonical body.\n\n## Evidence\n- Existing evidence",
         source="agent:existing",
+        extra_frontmatter={"see_also": "[knowledge/facts/workspace/related.md]"},
     )
     candidate = _write_inbox_candidate(
         workspace,
@@ -137,6 +138,19 @@ def test_apply_merge_replace(workspace):
     assert "Candidate body." in content
     assert "Canonical body." not in content
     assert "knowledge/inbox/candidate.md" in content
+    assert "knowledge/facts/workspace/related.md" in content
+    assert "source: agent:existing + agent:test" in content
+
+
+def test_similarity_threshold_accepts_fraction_and_percentage(monkeypatch):
+    monkeypatch.setenv("TEST_SIMILARITY_THRESHOLD", "0.85")
+    assert ka.env_similarity_threshold("TEST_SIMILARITY_THRESHOLD", 0.5) == 0.85
+    monkeypatch.setenv("TEST_SIMILARITY_THRESHOLD", "85")
+    assert ka.env_similarity_threshold("TEST_SIMILARITY_THRESHOLD", 0.5) == 0.85
+
+
+def test_merge_sources_deduplicates_authorities():
+    assert ka.merge_sources("agent:one + agent:two", "agent:two") == "agent:one + agent:two"
 
 
 def test_apply_merge_missing_candidate_returns_error(workspace):
@@ -169,6 +183,15 @@ def test_content_overlap_flags_similar_entries(workspace):
     kl.check_content_overlap(workspace, findings)
 
     assert any(f.check_id == "content-overlap" for f in findings)
+
+
+def test_content_overlap_missing_index_warns(workspace, capsys):
+    findings: list[kl.Finding] = []
+
+    kl.check_content_overlap(workspace, findings)
+
+    assert "FTS5 index not found" in capsys.readouterr().err
+    assert findings == []
 
 
 def test_content_overlap_skips_deprecated_entries(workspace):
