@@ -1,4 +1,10 @@
 export type CandidateEnvelope<T = unknown> = { candidates: T[] };
+export const CANDIDATE_SUBMISSION_TOOL_NAME = "submit_shared_knowledge_candidates";
+
+type ResponseBlock =
+  | { type: "text"; text?: string }
+  | { type: "thinking" }
+  | { type: "toolCall"; name?: string; arguments?: unknown };
 
 export class CandidateResponseParseError extends Error {
   constructor(readonly diagnostic: string) {
@@ -80,6 +86,48 @@ export function parseCandidateResponse<T = unknown>(raw: string): CandidateEnvel
     `unterminatedFence=${fenceCount % 2 === 1 ? "yes" : "no"}`,
   ].join(",");
   throw new CandidateResponseParseError(diagnostic.slice(0, 200));
+}
+
+export function parseCandidateAssistantResponse<T = unknown>(
+  content: ResponseBlock[],
+  stopReason: string,
+): CandidateEnvelope<T> {
+  for (const block of content) {
+    if (block.type !== "toolCall" || block.name !== CANDIDATE_SUBMISSION_TOOL_NAME) continue;
+    if (isEnvelope(block.arguments)) return block.arguments as CandidateEnvelope<T>;
+  }
+
+  const text = content
+    .filter((block): block is Extract<ResponseBlock, { type: "text" }> => block.type === "text")
+    .map((block) => block.text ?? "")
+    .join("\n");
+  try {
+    return parseCandidateResponse<T>(text);
+  } catch (error) {
+    const base = error instanceof CandidateResponseParseError ? error.diagnostic : "unclassified";
+    const textBlocks = content.filter((block) => block.type === "text").length;
+    const toolCalls = content.filter((block) => block.type === "toolCall").length;
+    const diagnostic = `${base},stopReason=${stopReason || "unknown"},blocks=${content.length},textBlocks=${textBlocks},toolCalls=${toolCalls}`;
+    throw new CandidateResponseParseError(diagnostic.slice(0, 300));
+  }
+}
+
+export function extractionFailureNotice(
+  state: "retry-wait" | "failed",
+  attempts: number,
+  jobId: string,
+  error: unknown,
+): { message: string; level: "warning" | "error" } {
+  if (state === "failed") {
+    return {
+      message: `shared-knowledge background extraction failed after ${attempts} attempts. Retained job ${jobId} can be retried with: knowledge-jobs --root <workspace> retry ${jobId}`,
+      level: "error",
+    };
+  }
+  return {
+    message: `shared-knowledge background extraction deferred and will retry: ${String(error)}`,
+    level: "warning",
+  };
 }
 
 export function extractionRetryInstruction(attempts: number, lastError?: string): string {
