@@ -31,8 +31,10 @@ Extract ONLY these kinds of facts:
 
 ## Output format
 
-Return a JSON object with a single key `candidates` containing an array of
-candidate objects. If no durable facts are found, return `{"candidates": []}`.
+When a `submit_shared_knowledge_candidates` tool is available, call that tool
+exactly once with a single `candidates` array. Otherwise, return a JSON object
+with a single key `candidates` containing the array. If no durable facts are
+found, submit or return `{"candidates": []}`.
 
 Each candidate object MUST have these fields:
 
@@ -81,8 +83,9 @@ Each candidate object MUST have these fields:
 
 ## Response format reminder
 
-Return ONLY valid JSON. No markdown wrapping, no explanation text outside the
-JSON. Example:
+Use the candidate submission tool when provided. Without that tool, return ONLY
+valid JSON with no markdown wrapping or explanation text outside the JSON.
+Example:
 
 ```json
 {

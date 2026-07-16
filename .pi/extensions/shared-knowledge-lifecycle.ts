@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Type } from "typebox";
 import {
   KnowledgeJobQueue,
   createCapturedPayload,
@@ -20,8 +21,10 @@ import {
   type Candidate,
 } from "../../src/pi-lifecycle-materializer.ts";
 import {
+  CANDIDATE_SUBMISSION_TOOL_NAME,
+  extractionFailureNotice,
   extractionRetryInstruction,
-  parseCandidateResponse,
+  parseCandidateAssistantResponse,
 } from "../../src/candidate-response.ts";
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -31,6 +34,27 @@ const SOURCES_SCRIPT = join(PACKAGE_ROOT, "scripts", "knowledge_sources.py");
 const running = new Set<string>();
 const timers = new Map<string, NodeJS.Timeout>();
 const busy = new Set<string>();
+const CANDIDATE_SUBMISSION_TOOL = {
+  name: CANDIDATE_SUBMISSION_TOOL_NAME,
+  description: "Submit zero or more strictly structured durable shared-knowledge candidates.",
+  parameters: Type.Object({
+    candidates: Type.Array(Type.Object({
+      name: Type.String({ minLength: 1, maxLength: 80 }),
+      description: Type.String({ minLength: 1, maxLength: 180 }),
+      type: Type.Union([
+        Type.Literal("architectural-invariant"),
+        Type.Literal("reference"),
+        Type.Literal("project"),
+        Type.Literal("feedback"),
+      ]),
+      suggested_scope: Type.String({ pattern: "^(workspace|module:[a-z0-9][a-z0-9-]*|capability:[a-z0-9][a-z0-9-]*)$" }),
+      body: Type.String({ minLength: 20 }),
+      reason: Type.String({ minLength: 1 }),
+      candidate_id: Type.String({ minLength: 1 }),
+      evidence: Type.Optional(Type.Array(Type.String())),
+    })),
+  }),
+};
 
 function runAbsorber(cwd: string): Promise<void> {
   if (!existsSync(ABSORBER_SCRIPT)) return Promise.resolve();
@@ -97,20 +121,17 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
           role: "user",
           content: [{
             type: "text",
-            text: `${promptText()}${retryInstruction ? `\n\n${retryInstruction}` : ""}\n\nReview this conversation:\n\n${job.payload.conversation}`,
+            text: `${promptText()}${retryInstruction ? `\n\n${retryInstruction}` : ""}\n\nSubmit the result with the ${CANDIDATE_SUBMISSION_TOOL_NAME} tool.\n\nReview this conversation:\n\n${job.payload.conversation}`,
           }],
           timestamp: Date.now(),
         }],
-      }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: 4096, signal: controller.signal });
+        tools: [CANDIDATE_SUBMISSION_TOOL],
+      }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: 4096, signal: controller.signal, toolChoice: "required" });
     } finally {
       clearTimeout(timeout);
     }
 
-    const responseText = response.content
-      .filter((part) => part.type === "text")
-      .map((part) => part.text ?? "")
-      .join("\n");
-    const parsed = parseCandidateResponse<Candidate>(responseText);
+    const parsed = parseCandidateAssistantResponse<Candidate>(response.content, response.stopReason);
     const candidates = parsed.candidates
       .map((candidate) => job.payload?.source ? {
         ...candidate,
@@ -188,8 +209,18 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
         }
       })
       .catch((error) => {
-        for (const item of batch) queue.markRetry(item.id, error);
-        ctx.ui.notify(`shared-knowledge background extraction deferred: ${String(error)}`, "warning");
+        const updated = batch.map((item) => queue.markRetry(item.id, error));
+        const terminal = updated.find((item) => item.state === "failed");
+        const representative = terminal ?? updated[0];
+        if (representative) {
+          const notice = extractionFailureNotice(
+            representative.state === "failed" ? "failed" : "retry-wait",
+            representative.attempts,
+            representative.id,
+            error,
+          );
+          ctx.ui.notify(notice.message, notice.level);
+        }
       })
       .finally(() => {
         running.delete(cwd);
