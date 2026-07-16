@@ -307,8 +307,12 @@ extract → validate → materialize → optional no-git absorb
 
 Candidate extraction no longer adds an awaited LLM call to compaction. Background
 failure is fail-open for the session and fail-closed for canonical mutation. The
-safe default `review` mode leaves the checkout unchanged; explicit `inbox` and
-argv-based `command` materializers retain their existing authority boundaries.
+response parser accepts a direct JSON envelope, a fenced envelope, or one balanced
+JSON envelope surrounded by prose, while candidate validation remains strict.
+Parse diagnostics contain only bounded structural metadata, never response text;
+later attempts add a JSON-only correction instruction. The safe default `review`
+mode leaves the checkout unchanged; explicit `inbox` and argv-based `command`
+materializers retain their existing authority boundaries.
 
 ### Background job operations
 
@@ -319,6 +323,7 @@ authorization headers are never persisted.
 ```bash
 knowledge-jobs --root . status
 knowledge-jobs --root . show <job-id>   # explicit review-candidate detail
+knowledge-jobs --root . retry <job-id>  # failed job only; requires retained payload
 knowledge-jobs --root . purge --retention-days 7 --dry-run
 knowledge-jobs --root . purge --retention-days 7
 ```

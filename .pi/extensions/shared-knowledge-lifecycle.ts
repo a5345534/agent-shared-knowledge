@@ -19,6 +19,10 @@ import {
   validateCandidate,
   type Candidate,
 } from "../../src/pi-lifecycle-materializer.ts";
+import {
+  extractionRetryInstruction,
+  parseCandidateResponse,
+} from "../../src/candidate-response.ts";
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PROMPT_FILE = join(PACKAGE_ROOT, ".pi", "prompts", "compact-review.md");
@@ -27,11 +31,6 @@ const SOURCES_SCRIPT = join(PACKAGE_ROOT, "scripts", "knowledge_sources.py");
 const running = new Set<string>();
 const timers = new Map<string, NodeJS.Timeout>();
 const busy = new Set<string>();
-
-function responseText(content: Array<{ type: string; text?: string }>): string {
-  return content.filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n")
-    .replace(/^```(?:json)?\n?/i, "").replace(/\n?```\s*$/, "").trim();
-}
 
 function runAbsorber(cwd: string): Promise<void> {
   if (!existsSync(ABSORBER_SCRIPT)) return Promise.resolve();
@@ -92,10 +91,14 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     timeout.unref();
     let response: Awaited<ReturnType<typeof complete>>;
     try {
+      const retryInstruction = extractionRetryInstruction(job.attempts, job.error);
       response = await complete(model, {
         messages: [{
           role: "user",
-          content: [{ type: "text", text: `${promptText()}\n\nReview this conversation:\n\n${job.payload.conversation}` }],
+          content: [{
+            type: "text",
+            text: `${promptText()}${retryInstruction ? `\n\n${retryInstruction}` : ""}\n\nReview this conversation:\n\n${job.payload.conversation}`,
+          }],
           timestamp: Date.now(),
         }],
       }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: 4096, signal: controller.signal });
@@ -103,25 +106,22 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       clearTimeout(timeout);
     }
 
-    let parsed: { candidates?: Candidate[] };
-    try {
-      parsed = JSON.parse(responseText(response.content));
-    } catch {
-      throw new Error("Model returned invalid candidate JSON");
-    }
-    const candidates = Array.isArray(parsed.candidates)
-      ? parsed.candidates
-        .map((candidate) => job.payload?.source ? {
-          ...candidate,
-          capture_source: `source:${job.payload.source.instanceId}`,
-          source_instance: job.payload.source.instanceId,
-          source_run_id: job.payload.source.runId,
-          evidence_snapshot: job.payload.source.snapshot,
-          source_revision: job.payload.source.revision,
-          evidence_paths: job.payload.source.evidencePaths ?? [],
-        } : candidate)
-        .filter((candidate) => validateCandidate(candidate).length === 0)
-      : [];
+    const responseText = response.content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text ?? "")
+      .join("\n");
+    const parsed = parseCandidateResponse<Candidate>(responseText);
+    const candidates = parsed.candidates
+      .map((candidate) => job.payload?.source ? {
+        ...candidate,
+        capture_source: `source:${job.payload.source.instanceId}`,
+        source_instance: job.payload.source.instanceId,
+        source_run_id: job.payload.source.runId,
+        evidence_snapshot: job.payload.source.snapshot,
+        source_revision: job.payload.source.revision,
+        evidence_paths: job.payload.source.evidencePaths ?? [],
+      } : candidate)
+      .filter((candidate) => validateCandidate(candidate).length === 0);
     const materializer = parseMaterializerConfig();
     const result = await materializeCandidates(materializer, candidates, ctx.cwd);
     if (result.mode === "inbox" && result.written.length > 0) await runAbsorber(ctx.cwd);

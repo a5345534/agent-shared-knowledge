@@ -54,6 +54,31 @@ test("running jobs recover and retries become terminal", () => {
   assert.equal(queue.read(job.id)?.state, "failed");
 });
 
+test("failed jobs with retained payload can be explicitly retried", () => {
+  const { root, env } = fixture();
+  const queue = new KnowledgeJobQueue(root, { maxPayloadBytes: 2048, retentionDays: 7, maxAttempts: 1, debounceMs: 0, maxBatchJobs: 4 }, env);
+  const { job } = queue.enqueue(createCapturedPayload(root, "s", "must preserve this durable decision ".repeat(20), queue.config));
+  queue.markRetry(job.id, "invalid candidate JSON");
+
+  const retried = queue.retryFailed(job.id);
+  assert.equal(retried.state, "pending");
+  assert.equal(retried.attempts, 0);
+  assert.equal(retried.error, undefined);
+  assert.ok(retried.payload);
+  assert.equal(queue.nextReady()?.id, job.id);
+  assert.throws(() => queue.retryFailed(job.id), /is not failed/);
+});
+
+test("failed jobs without retained payload cannot be retried", () => {
+  const { root, env } = fixture();
+  const queue = new KnowledgeJobQueue(root, { maxPayloadBytes: 2048, retentionDays: 0, maxAttempts: 1, debounceMs: 0, maxBatchJobs: 4 }, env);
+  const { job } = queue.enqueue(createCapturedPayload(root, "s", "must preserve this durable decision ".repeat(20), queue.config));
+  queue.markRetry(job.id, "invalid candidate JSON");
+  queue.cleanup({ now: Date.now() + 1000 });
+
+  assert.throws(() => queue.retryFailed(job.id), /no retained payload/);
+});
+
 test("ready jobs from one session are batched within limit", () => {
   const { root, env } = fixture();
   const config = { maxPayloadBytes: 2048, retentionDays: 7, maxAttempts: 3, debounceMs: 0, maxBatchJobs: 2 };
