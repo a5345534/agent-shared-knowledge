@@ -314,6 +314,39 @@ later attempts add a JSON-only correction instruction. The safe default `review`
 mode leaves the checkout unchanged; explicit `inbox` and argv-based `command`
 materializers retain their existing authority boundaries.
 
+### Interactive background model configuration
+
+Configure the extraction model inside Pi without changing the foreground model:
+
+```text
+/knowledge-model                              # TUI model + scope selector
+/knowledge-model active --scope session
+/knowledge-model openrouter/anthropic/claude-sonnet-4 --scope workspace
+/knowledge-model reset --scope global
+/knowledge-config                             # model/reset/status menu
+/knowledge-status                             # effective policy + redacted queue counts
+```
+
+Scopes are `session` (memory only), `workspace` (the existing Git-private/XDG
+runtime root's `config.json`), and `global` (`~/.pi/agent/shared-knowledge.json`,
+or the configured Pi agent directory). Persistent writes are atomic, mode 0600,
+and contain model identity only—credentials continue to resolve at attempt time
+through Pi's model registry.
+
+Precedence is environment → session → workspace → global → active Pi model.
+`SHARED_KNOWLEDGE_EXTRACTION_MODEL` is a read-only lock in the UI. A malformed
+non-empty environment value fails closed rather than falling through to a
+possibly different-cost model. Fixed identities split only the first `/`, so
+provider model IDs such as `openrouter/anthropic/claude-sonnet-4` remain exact.
+Unavailable or unauthenticated fixed models also fail closed; pending and retry
+jobs use configuration effective at their next attempt, while running requests
+are not switched.
+
+Under an environment lock, TUI writes require confirmation and explicit command
+writes require `--allow-inactive`; the saved lower-scope value remains inactive
+until the environment override is removed. These commands do not change
+materializer authority or write tracked project settings.
+
 ### Background job operations
 
 Runtime payloads are stored outside tracked checkout content (prefer Git-private
