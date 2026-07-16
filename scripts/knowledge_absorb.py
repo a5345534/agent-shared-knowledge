@@ -18,6 +18,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from knowledge_fts import fts5_literal_query
+
 VALID_MEMORY_TYPES = {"feedback", "project", "reference", "user", "architectural-invariant", "deprecated"}
 ACTION_VALUES = {
     "retain_memory",
@@ -393,7 +395,7 @@ def dedup_check(root: Path, frontmatter: dict[str, Any], body: str) -> dict | No
         db = sqlite3.connect(str(sqlite_path))
         db.row_factory = sqlite3.Row
         try:
-            fts_query_text = (candidate_name or candidate_desc).strip().rstrip(".!?,")[:100]
+            fts_query_text = fts5_literal_query(candidate_name or candidate_desc)
             if not fts_query_text:
                 return None
 

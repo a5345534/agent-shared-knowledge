@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import unquote
 
+from knowledge_fts import fts5_literal_query
+
 
 VALID_MEMORY_TYPES = {
     "feedback",
@@ -669,17 +671,27 @@ def check_content_overlap(root: Path, findings: list[Finding]) -> None:
                 entry_name = (frontmatter.get("name", "") or "").strip()
                 if not entry_name:
                     continue
-                sanitized = entry_name.strip().rstrip(".!?,")[:100]
-                rows = db.execute(
-                    """SELECT me.*, rank
-                       FROM memory_entries me
-                       JOIN memory_entries_fts ON me.rowid = memory_entries_fts.rowid
-                       WHERE memory_entries_fts MATCH ?
-                         AND me.type != 'deprecated'
-                       ORDER BY rank
-                       LIMIT 10""",
-                    [sanitized],
-                ).fetchall()
+                query_text = fts5_literal_query(entry_name)
+                if not query_text:
+                    continue
+                try:
+                    rows = db.execute(
+                        """SELECT me.*, rank
+                           FROM memory_entries me
+                           JOIN memory_entries_fts ON me.rowid = memory_entries_fts.rowid
+                           WHERE memory_entries_fts MATCH ?
+                             AND me.type != 'deprecated'
+                           ORDER BY rank
+                           LIMIT 10""",
+                        [query_text],
+                    ).fetchall()
+                except sqlite3.OperationalError as exc:
+                    diagnostic = str(exc).replace("\n", " ")[:200]
+                    print(
+                        f"[lint] FTS5 content-overlap query failed for {location}: {diagnostic}",
+                        file=sys.stderr,
+                    )
+                    continue
 
                 for row in rows:
                     other_path = row["path"]
