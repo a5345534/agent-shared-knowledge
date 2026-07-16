@@ -3,7 +3,7 @@
 from __future__ import annotations
 import argparse, datetime as dt, json, os, sys
 from pathlib import Path
-from knowledge_sources import runtime_root
+from knowledge_sources import atomic_json, runtime_root
 
 TERMINAL = {"done", "review-ready", "skipped", "failed"}
 
@@ -25,7 +25,7 @@ def safe(job: dict) -> dict:
 
 def main()->int:
     p=argparse.ArgumentParser();p.add_argument("--root",default="."); sub=p.add_subparsers(dest="command",required=True)
-    sub.add_parser("status"); show=sub.add_parser("show");show.add_argument("job_id"); purge=sub.add_parser("purge");purge.add_argument("--retention-days",type=int,default=7);purge.add_argument("--dry-run",action="store_true");purge.add_argument("--all-terminal",action="store_true")
+    sub.add_parser("status"); show=sub.add_parser("show");show.add_argument("job_id"); retry=sub.add_parser("retry");retry.add_argument("job_id"); purge=sub.add_parser("purge");purge.add_argument("--retention-days",type=int,default=7);purge.add_argument("--dry-run",action="store_true");purge.add_argument("--all-terminal",action="store_true")
     a=p.parse_args();root=Path(a.root).resolve()
     if a.command=="status": value={"runtimeRoot":str(runtime_root(root)),"jobs":[safe(job) for _,job in jobs(root)]}
     elif a.command=="show":
@@ -33,6 +33,16 @@ def main()->int:
         if not matches: print(json.dumps({"error":"job not found"}),file=sys.stderr);return 1
         job=matches[0]; result=job.get("result") if isinstance(job.get("result"),dict) else {}
         value={"job":safe(job),"reviewCandidates":result.get("reviewCandidates",[])}
+    elif a.command=="retry":
+        matches=[(path,job) for path,job in jobs(root) if job.get("id")==a.job_id]
+        if not matches: print(json.dumps({"error":"job not found"}),file=sys.stderr);return 1
+        path,job=matches[0]
+        if job.get("state")!="failed": print(json.dumps({"error":"job is not failed"}),file=sys.stderr);return 2
+        if not job.get("payload"): print(json.dumps({"error":"job has no retained payload"}),file=sys.stderr);return 2
+        job["state"]="pending";job["attempts"]=0;job["updatedAt"]=dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00","Z")
+        for key in ("nextAttemptAt","error","result"): job.pop(key,None)
+        atomic_json(path,job)
+        value={"retried":a.job_id,"job":safe(job)}
     else:
         cutoff=dt.datetime.now(dt.timezone.utc).timestamp()-a.retention_days*86400; removed=[]
         for path,job in jobs(root):
@@ -47,7 +57,6 @@ def main()->int:
                     job["payload"] = None; result.pop("reviewCandidates", None); job["result"] = result or None
                     job["purgedAt"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
                     job["updatedAt"] = job["purgedAt"]
-                    from knowledge_sources import atomic_json
                     atomic_json(path, job)
         value={"removed":removed,"dryRun":a.dry_run,"retentionDays":a.retention_days}
     print(json.dumps(value,ensure_ascii=False,indent=2));return 0

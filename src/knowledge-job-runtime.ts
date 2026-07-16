@@ -264,6 +264,20 @@ export class KnowledgeJobQueue {
     });
   }
 
+  retryFailed(id: string): KnowledgeJob {
+    const current = this.read(id);
+    if (!current) throw new Error(`Unknown knowledge job: ${id}`);
+    if (current.state !== "failed") throw new Error(`Knowledge job ${id} is not failed`);
+    if (!current.payload) throw new Error(`Knowledge job ${id} has no retained payload`);
+    return this.update(id, {
+      state: "pending",
+      attempts: 0,
+      nextAttemptAt: undefined,
+      error: undefined,
+      result: undefined,
+    });
+  }
+
   status(): Array<Omit<KnowledgeJob, "payload" | "result"> & { hasPayload: boolean; result?: Omit<NonNullable<KnowledgeJob["result"]>, "reviewCandidates"> }> {
     return this.list().map(({ payload, result, ...job }) => ({
       ...job,
