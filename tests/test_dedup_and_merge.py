@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 import jsonschema
 
 import knowledge_absorb as ka
+import knowledge_fts as kf
 import knowledge_lint as kl
 from tests.conftest import _write_curated_entry, _write_inbox_candidate
 
@@ -61,6 +63,14 @@ def _candidate_and_target(workspace: Path) -> tuple[Path, Path]:
     return candidate, target
 
 
+def test_fts5_literal_query_bounds_and_escapes_syntax():
+    assert kf.fts5_literal_query('  Version 1.2 (D6): "read-only"\x00 OR rule  ') == (
+        '"Version 1.2 (D6): ""read-only"" OR rule"'
+    )
+    assert kf.fts5_literal_query("ignored", max_chars=0) == ""
+    assert len(kf.fts5_literal_query("x" * 200)) == 102
+
+
 def test_dedup_check_high_match_routes_to_merge(workspace):
     _write_curated_entry(
         workspace,
@@ -80,6 +90,28 @@ def test_dedup_check_high_match_routes_to_merge(workspace):
     assert result is not None
     assert result["action"] == "merge_into_existing"
     assert result["mergeInto"].endswith("validation-hook.md")
+
+
+def test_dedup_check_handles_punctuated_candidate_name(workspace):
+    name = 'Version 1.2 (D6): "read-only" rule'
+    _write_curated_entry(
+        workspace,
+        "knowledge/facts/workspace",
+        "punctuated-rule.md",
+        name=name,
+        description="Punctuated internal evidence remains literal.",
+    )
+    _rebuild_index(workspace)
+
+    result = ka.dedup_check(
+        workspace,
+        {"name": name, "description": "Punctuated internal evidence remains literal."},
+        "Matching candidate body.",
+    )
+
+    assert result is not None
+    assert result["action"] == "merge_into_existing"
+    assert result["mergeInto"].endswith("punctuated-rule.md")
 
 
 def test_dedup_check_below_threshold_returns_none(workspace, monkeypatch):
@@ -172,6 +204,71 @@ def test_apply_plan_dispatches_merge_into_existing(workspace):
     assert not result.skipped
     assert target.relative_to(workspace).as_posix() in result.changedPaths
     assert not candidate.exists()
+
+
+def test_content_overlap_handles_punctuated_names(workspace, capsys):
+    name = 'Version 1.2 (D6): "read-only" rule'
+    _write_curated_entry(workspace, "knowledge/facts/workspace", "one.md", name=name)
+    _write_curated_entry(
+        workspace,
+        "knowledge/facts/module/testmod",
+        "two.md",
+        name=name,
+        scope="module:testmod",
+    )
+    _rebuild_index(workspace)
+    findings: list[kl.Finding] = []
+
+    kl.check_content_overlap(workspace, findings)
+
+    assert "syntax error" not in capsys.readouterr().err
+    assert any(f.check_id == "content-overlap" for f in findings)
+
+
+def test_content_overlap_continues_after_one_query_failure(workspace, monkeypatch, capsys):
+    _write_curated_entry(workspace, "knowledge/facts/workspace", "first.md", name="Fail.Once")
+    _write_curated_entry(workspace, "knowledge/facts/workspace", "later-one.md", name="Later Duplicate Rule")
+    _write_curated_entry(
+        workspace,
+        "knowledge/facts/module/testmod",
+        "later-two.md",
+        name="Later Duplicate Rule",
+        scope="module:testmod",
+    )
+    _rebuild_index(workspace)
+    real_connect = sqlite3.connect
+
+    class FailFirstMatch:
+        def __init__(self, *args, **kwargs):
+            self.inner = real_connect(*args, **kwargs)
+            self.failed = False
+
+        @property
+        def row_factory(self):
+            return self.inner.row_factory
+
+        @row_factory.setter
+        def row_factory(self, value):
+            self.inner.row_factory = value
+
+        def execute(self, sql, parameters=()):
+            if " MATCH " in sql and not self.failed:
+                self.failed = True
+                raise sqlite3.OperationalError("synthetic punctuation failure")
+            return self.inner.execute(sql, parameters)
+
+        def close(self):
+            self.inner.close()
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: FailFirstMatch(*args, **kwargs))
+    findings: list[kl.Finding] = []
+
+    kl.check_content_overlap(workspace, findings)
+
+    stderr = capsys.readouterr().err
+    assert "knowledge/facts/workspace/first.md" in stderr
+    assert "synthetic punctuation failure" in stderr
+    assert any(f.check_id == "content-overlap" and "later" in f.location for f in findings)
 
 
 def test_content_overlap_flags_similar_entries(workspace):
