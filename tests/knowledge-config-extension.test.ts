@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import sharedKnowledgeLifecycle from "../.pi/extensions/shared-knowledge-lifecycle.ts";
+import { createCapturedPayload, KnowledgeJobQueue } from "../src/knowledge-job-runtime.ts";
 
 test("extension registers commands, isolates sessions, completes exact models, and never changes foreground model", async () => {
   const commands = new Map<string, any>();
@@ -32,8 +33,12 @@ test("extension registers commands, isolates sessions, completes exact models, a
       { provider: "openai", id: "gpt-test" },
     ];
     const notifications: string[] = [];
+    const workspace = join(root, "workspace");
+    const queue = new KnowledgeJobQueue(workspace);
+    const queued = queue.enqueue(createCapturedPayload(workspace, "other-process", "A durable architecture decision must remain private and deterministic. ".repeat(10)));
+    queue.update(queued.job.id, { state: "running" });
     const makeContext = (session: object) => ({
-      cwd: join(root, "workspace"),
+      cwd: workspace,
       mode: "tui",
       hasUI: true,
       sessionManager: { getSessionFile: () => undefined, marker: session },
@@ -45,7 +50,7 @@ test("extension registers commands, isolates sessions, completes exact models, a
       },
       ui: {
         notify: (message: string) => notifications.push(message),
-        select: async () => undefined,
+        select: async (): Promise<string | undefined> => undefined,
         confirm: async () => true,
         setWidget() {}, setStatus() {},
       },
@@ -61,9 +66,22 @@ test("extension registers commands, isolates sessions, completes exact models, a
     await commands.get("knowledge-status").handler("", first);
     assert.match(notifications.at(-1)!, /openrouter\/anthropic\/claude-sonnet-4/);
     assert.match(notifications.at(-1)!, /Source: session/);
+    assert.match(notifications.at(-1)!, /running=1/);
+    assert.equal(queue.read(queued.job.id)?.state, "running", "status must not recover/mutate running jobs");
 
     await commands.get("knowledge-status").handler("", second);
     assert.match(notifications.at(-1)!, /active-provider\/active-model/);
+    assert.match(notifications.at(-1)!, /Source: active/);
+
+    const modelSelections = ["workspace", "active"];
+    second.ui.select = async () => modelSelections.shift();
+    await commands.get("knowledge-model").handler("", second);
+    await commands.get("knowledge-status").handler("", second);
+    assert.match(notifications.at(-1)!, /Source: workspace/);
+    const resetSelections = ["Reset a scope", "workspace"];
+    second.ui.select = async () => resetSelections.shift();
+    await commands.get("knowledge-config").handler("", second);
+    await commands.get("knowledge-status").handler("", second);
     assert.match(notifications.at(-1)!, /Source: active/);
     assert.equal(foregroundChanges, 0);
     assert.equal(JSON.stringify(notifications).includes("not-persisted"), false);

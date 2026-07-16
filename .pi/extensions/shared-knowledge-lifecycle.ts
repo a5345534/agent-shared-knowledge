@@ -157,7 +157,9 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
   };
   const statusText = (ctx: ExtensionContext) => {
     const effective = effectiveFor(ctx);
-    const queue = queueFor(ctx.cwd);
+    // Status must not call queueFor(): recovery mutates durable running jobs and
+    // could interfere with another Pi process. A view queue only reads states.
+    const queue = queues.get(ctx.cwd) ?? new KnowledgeJobQueue(ctx.cwd);
     const counts = summarizeQueue(queue.list());
     const configured = effective.policy ? formatModelPolicy(effective.policy) : "invalid environment value";
     const activeDetail = effective.policy?.mode === "active"

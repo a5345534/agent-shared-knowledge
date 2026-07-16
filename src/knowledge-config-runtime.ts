@@ -58,6 +58,12 @@ export function parseModelReference(value: string): ModelPolicy {
   return { mode: "fixed", provider, modelId };
 }
 
+export function parseEnvironmentModelReference(value: string): ModelPolicy {
+  const policy = parseModelReference(value);
+  if (policy.mode !== "fixed") throw new Error("environment override must be an exact provider/model-id reference");
+  return policy;
+}
+
 export function formatModelPolicy(policy: ModelPolicy): string {
   return policy.mode === "active" ? "active" : `${policy.provider}/${policy.modelId}`;
 }
@@ -102,8 +108,9 @@ export function readConfig(path: string): ReadConfigResult {
     const info = pathInfo(path);
     if (!info) return {};
     if (info.isSymbolicLink()) return { diagnostic: `config path is a symlink: ${path}` };
+    if (!info.isFile()) return { diagnostic: `config path is not a regular file: ${path}` };
+    if (info.size > 16_384) return { diagnostic: `config file is too large: ${path}` };
     const raw = readFileSync(path, "utf8");
-    if (Buffer.byteLength(raw) > 16_384) return { diagnostic: `config file is too large: ${path}` };
     return { policy: decodeConfig(JSON.parse(raw)).extractionModel };
   } catch {
     return { diagnostic: `invalid or unreadable config at ${path}` };
@@ -159,7 +166,7 @@ export function resolveEffectiveModel({
   const rawEnvironment = env[EXTRACTION_MODEL_ENV];
   if (rawEnvironment !== undefined && rawEnvironment.trim() !== "") {
     try {
-      return { policy: parseModelReference(rawEnvironment), source: "environment", locked: true, diagnostics };
+      return { policy: parseEnvironmentModelReference(rawEnvironment), source: "environment", locked: true, diagnostics };
     } catch (error) {
       return {
         source: "environment",

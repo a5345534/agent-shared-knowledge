@@ -68,6 +68,10 @@ test("malformed environment value remains a fail-closed lock", () => {
   assert.equal(result.policy, undefined);
   assert.match(result.error!, /Invalid SHARED_KNOWLEDGE_EXTRACTION_MODEL/);
   assert.throws(() => selectExtractionModel(result, { id: "active" }, () => ({ id: "fallback" })), /Invalid/);
+  const activeLock = resolveEffectiveModel({ env: { SHARED_KNOWLEDGE_EXTRACTION_MODEL: "active" } });
+  assert.equal(activeLock.source, "environment");
+  assert.equal(activeLock.policy, undefined);
+  assert.match(activeLock.error!, /exact provider\/model-id/);
 });
 
 test("workspace and global config paths and resets are isolated", () => {
@@ -126,6 +130,9 @@ test("malformed files yield bounded diagnostics and lower precedence", () => {
   const result = resolveEffectiveModel({ env: {}, workspace: bad, global: { policy: { mode: "active" } } });
   assert.equal(result.source, "global");
   assert.equal(result.diagnostics.length, 1);
+  const directoryPath = join(root, "directory-config");
+  mkdirSync(directoryPath);
+  assert.match(readConfig(directoryPath).diagnostic!, /not a regular file/);
 });
 
 test("argument parsing covers scopes reset lock opt-in and completion", () => {
