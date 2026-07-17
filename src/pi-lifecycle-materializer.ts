@@ -1,38 +1,16 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { parseMaterializerConfig, type MaterializerConfig } from "./knowledge-config-runtime.ts";
 
+export { parseMaterializerConfig, type MaterializerConfig } from "./knowledge-config-runtime.ts";
 export type Candidate = Record<string, unknown>;
-export type MaterializerConfig =
-  | { mode: "review" }
-  | { mode: "inbox" }
-  | { mode: "command"; argv: string[] };
 
 const SLUG_RE = /[^a-z0-9]+/g;
 
 export function slugify(value: string, fallback = "candidate"): string {
   return value.toLowerCase().replace(/\.md$/, "").replace(SLUG_RE, "-")
     .replace(/^-+|-+$/g, "").slice(0, 80) || fallback;
-}
-
-export function parseMaterializerConfig(env: NodeJS.ProcessEnv = process.env): MaterializerConfig {
-  const mode = (env.SHARED_KNOWLEDGE_MATERIALIZER ?? "review").trim().toLowerCase();
-  if (mode === "" || mode === "review") return { mode: "review" };
-  if (mode === "inbox") return { mode: "inbox" };
-  if (mode !== "command") throw new Error(`Unsupported materializer mode: ${mode}`);
-
-  const raw = env.SHARED_KNOWLEDGE_MATERIALIZER_COMMAND;
-  if (!raw) throw new Error("Command materializer requires SHARED_KNOWLEDGE_MATERIALIZER_COMMAND");
-  let argv: unknown;
-  try {
-    argv = JSON.parse(raw);
-  } catch {
-    throw new Error("Materializer command must be a JSON argv array");
-  }
-  if (!Array.isArray(argv) || argv.length === 0 || argv.some((item) => typeof item !== "string" || !item)) {
-    throw new Error("Materializer command must be a non-empty JSON string array");
-  }
-  return { mode: "command", argv };
 }
 
 export function validateCandidate(candidate: Candidate): string[] {
@@ -106,6 +84,9 @@ export async function materializeCandidates(
 ): Promise<{ mode: MaterializerConfig["mode"]; written: string[] }> {
   if (config.mode === "review") return { mode: "review", written: [] };
   if (config.mode === "command") {
+    // Zero validated candidates is a successful extraction outcome, not an
+    // external-command error. Keep command authority dormant for this no-op.
+    if (candidates.length === 0) return { mode: "command", written: [] };
     await runCommand(config.argv, `${JSON.stringify({ version: 1, cwd, candidates })}\n`, cwd);
     return { mode: "command", written: [] };
   }

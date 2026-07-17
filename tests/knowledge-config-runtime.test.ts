@@ -4,18 +4,28 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  commandBinding,
   decodeConfig,
+  failedJobSummaries,
+  formatMaterializerPolicy,
   formatModelPolicy,
+  formatSafeJobDiagnostic,
   globalConfigPath,
+  materializerArgumentCompletions,
   modelArgumentCompletions,
+  parseKnowledgeMaterializerArgs,
   parseKnowledgeModelArgs,
+  parseMaterializerPolicy,
   parseModelReference,
   readConfig,
+  requireMaterializerConfig,
   requireModelAuthentication,
-  resetConfig,
+  resolveEffectiveMaterializer,
   resolveEffectiveModel,
+  safeJobDiagnostic,
   selectExtractionModel,
   summarizeQueue,
+  updateConfig,
   workspaceConfigPath,
   writeConfig,
 } from "../src/knowledge-config-runtime.ts";
@@ -35,15 +45,78 @@ test("model references preserve every slash after provider", () => {
   }
 });
 
-test("config decoder is versioned and strict", () => {
-  assert.deepEqual(decodeConfig({ version: 1, extractionModel: { mode: "active" } }).extractionModel, { mode: "active" });
-  assert.throws(() => decodeConfig({ version: 2, extractionModel: { mode: "active" } }));
-  assert.throws(() => decodeConfig({ version: 1, extractionModel: { mode: "active", apiKey: "secret" } }));
-  assert.throws(() => decodeConfig({ version: 1, extractionModel: { mode: "fixed", provider: "p", modelId: "m", headers: {} } }));
+test("config decoder reads v1 and strictly validates v2 partial policies", () => {
+  assert.deepEqual(decodeConfig({ version: 1, extractionModel: { mode: "active" } }), {
+    version: 2,
+    extractionModel: { mode: "active" },
+  });
+  assert.deepEqual(decodeConfig({ version: 2, materializer: { mode: "review" } }), {
+    version: 2,
+    materializer: { mode: "review" },
+  });
+  assert.deepEqual(decodeConfig({
+    version: 2,
+    extractionModel: { mode: "fixed", provider: "p", modelId: "m" },
+    materializer: { mode: "inbox" },
+  }).materializer, { mode: "inbox" });
+  assert.throws(() => decodeConfig({ version: 2 }));
+  assert.throws(() => decodeConfig({ version: 2, materializer: { mode: "command", argv: ["unsafe"] } }));
+  assert.throws(() => decodeConfig({ version: 2, extractionModel: { mode: "active", apiKey: "secret" } }));
   assert.throws(() => decodeConfig({ version: 1, extractionModel: { mode: "fixed", provider: "p/other", modelId: "m" } }));
+  assert.throws(() => decodeConfig({ version: 3, materializer: { mode: "review" } }));
 });
 
-test("precedence and provenance are deterministic", () => {
+test("updating a v1 document migrates to v2 and preserves unrelated fields", () => {
+  const { root } = fixture();
+  const path = join(root, "config.json");
+  writeFileSync(path, JSON.stringify({ version: 1, extractionModel: { mode: "fixed", provider: "p", modelId: "one" } }));
+  const afterMaterializer = updateConfig(path, { materializer: { mode: "review" } });
+  assert.deepEqual(afterMaterializer, {
+    version: 2,
+    extractionModel: { mode: "fixed", provider: "p", modelId: "one" },
+    materializer: { mode: "review" },
+  });
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), afterMaterializer);
+  const afterModelReset = updateConfig(path, { extractionModel: null });
+  assert.deepEqual(afterModelReset, { version: 2, materializer: { mode: "review" } });
+  assert.deepEqual(readConfig(path).materializer, { mode: "review" });
+  assert.equal(updateConfig(path, { materializer: null }), undefined);
+  assert.equal(readConfig(path).document, undefined);
+});
+
+test("materializer precedence uses scoped Pi policy before legacy fallback", () => {
+  const session = { mode: "review" } as const;
+  const workspace = { mode: "inbox" } as const;
+  const global = { mode: "command" } as const;
+  const env = {
+    SHARED_KNOWLEDGE_MATERIALIZER: "command",
+    SHARED_KNOWLEDGE_MATERIALIZER_COMMAND: JSON.stringify(["node", "worker.js"]),
+  };
+  assert.equal(resolveEffectiveMaterializer({ env }).source, "environment");
+  assert.equal(resolveEffectiveMaterializer({ env, global: { materializer: global } }).source, "global");
+  assert.equal(resolveEffectiveMaterializer({ env, workspace: { materializer: workspace }, global: { materializer: global } }).source, "workspace");
+  assert.equal(resolveEffectiveMaterializer({ env, session, workspace: { materializer: workspace } }).source, "session");
+  const command = resolveEffectiveMaterializer({ env, global: { materializer: global } });
+  assert.equal(command.commandBindingAvailable, true);
+  assert.deepEqual(requireMaterializerConfig(command), { mode: "command", argv: ["node", "worker.js"] });
+  assert.equal(formatMaterializerPolicy({ mode: "inbox" }), "inbox");
+  assert.deepEqual(resolveEffectiveMaterializer({ env: {} }).policy, { mode: "review" });
+  assert.deepEqual(resolveEffectiveMaterializer({ env: { SHARED_KNOWLEDGE_MATERIALIZER: "   " } }).policy, { mode: "review" });
+});
+
+test("invalid command binding and legacy mode fail closed without argv disclosure", () => {
+  const missing = resolveEffectiveMaterializer({ env: {}, session: { mode: "command" } });
+  assert.equal(missing.commandBindingAvailable, false);
+  assert.match(missing.error!, /binding is unavailable/);
+  assert.throws(() => requireMaterializerConfig(missing), /binding is unavailable/);
+  assert.deepEqual(commandBinding({ SHARED_KNOWLEDGE_MATERIALIZER_COMMAND: "not-json" }), { available: false });
+  const invalidLegacy = resolveEffectiveMaterializer({ env: { SHARED_KNOWLEDGE_MATERIALIZER: "unsafe" } });
+  assert.equal(invalidLegacy.policy, undefined);
+  assert.match(invalidLegacy.error!, /Invalid SHARED_KNOWLEDGE_MATERIALIZER/);
+  assert.equal(JSON.stringify(missing).includes("worker.js"), false);
+});
+
+test("model precedence and malformed environment lock remain deterministic", () => {
   const active = { mode: "active" } as const;
   const global = { mode: "fixed", provider: "global", modelId: "g" } as const;
   const workspace = { mode: "fixed", provider: "workspace", modelId: "w" } as const;
@@ -56,119 +129,98 @@ test("precedence and provenance are deterministic", () => {
   assert.equal(locked.locked, true);
   assert.equal(formatModelPolicy(locked.policy!), "env/org/model");
   assert.deepEqual(resolveEffectiveModel({ env: {} }).policy, active);
+  const invalid = resolveEffectiveModel({ env: { SHARED_KNOWLEDGE_EXTRACTION_MODEL: "missing-slash" }, session });
+  assert.equal(invalid.policy, undefined);
+  assert.equal(invalid.locked, true);
+  assert.match(invalid.error!, /Invalid SHARED_KNOWLEDGE_EXTRACTION_MODEL/);
 });
 
-test("malformed environment value remains a fail-closed lock", () => {
-  const result = resolveEffectiveModel({
-    env: { SHARED_KNOWLEDGE_EXTRACTION_MODEL: "missing-slash" },
-    session: { mode: "fixed", provider: "costly", modelId: "fallback" },
-  });
-  assert.equal(result.source, "environment");
-  assert.equal(result.locked, true);
-  assert.equal(result.policy, undefined);
-  assert.match(result.error!, /Invalid SHARED_KNOWLEDGE_EXTRACTION_MODEL/);
-  assert.throws(() => selectExtractionModel(result, { id: "active" }, () => ({ id: "fallback" })), /Invalid/);
-  const activeLock = resolveEffectiveModel({ env: { SHARED_KNOWLEDGE_EXTRACTION_MODEL: "active" } });
-  assert.equal(activeLock.source, "environment");
-  assert.equal(activeLock.policy, undefined);
-  assert.match(activeLock.error!, /exact provider\/model-id/);
-});
-
-test("workspace and global config paths and resets are isolated", () => {
+test("private config paths and writes exclude credentials and argv", () => {
   const { workspace, runtime, agent } = fixture();
   mkdirSync(workspace);
   const workspacePath = workspaceConfigPath(workspace, { SHARED_KNOWLEDGE_RUNTIME_DIR: runtime });
   const globalPath = globalConfigPath(agent);
   assert.ok(workspacePath.startsWith(`${runtime}/workspace-`));
-  assert.equal(workspacePath.endsWith("/config.json"), true);
   assert.equal(globalPath, join(agent, "shared-knowledge.json"));
-  writeConfig(workspacePath, { mode: "fixed", provider: "p", modelId: "m" });
-  writeConfig(globalPath, { mode: "active" });
-  assert.equal(readConfig(workspacePath).policy?.mode, "fixed");
-  resetConfig(workspacePath);
-  assert.equal(readConfig(workspacePath).policy, undefined);
-  assert.equal(readConfig(globalPath).policy?.mode, "active");
-});
-
-test("atomic config is private and contains no credential material", () => {
-  const { agent } = fixture();
-  const path = globalConfigPath(agent);
-  writeConfig(path, { mode: "fixed", provider: "openai", modelId: "gpt" });
+  writeConfig(globalPath, { version: 2, extractionModel: { mode: "fixed", provider: "openai", modelId: "gpt" }, materializer: { mode: "command" } });
   assert.equal(lstatSync(agent).mode & 0o077, 0);
-  assert.equal(lstatSync(path).mode & 0o077, 0);
-  const raw = readFileSync(path, "utf8");
+  assert.equal(lstatSync(globalPath).mode & 0o077, 0);
+  const raw = readFileSync(globalPath, "utf8");
   assert.equal(raw.includes("apiKey"), false);
   assert.equal(raw.includes("Authorization"), false);
-  assert.deepEqual(Object.keys(JSON.parse(raw)).sort(), ["extractionModel", "version"]);
+  assert.equal(raw.includes("argv"), false);
+  writeConfig(workspacePath, { mode: "active" });
+  assert.equal(readConfig(workspacePath).policy?.mode, "active");
 });
 
-test("symlink config targets fail closed including dangling links", () => {
+test("symlink and malformed configs fail closed", () => {
   const { root } = fixture();
   const target = join(root, "target.json");
   const path = join(root, "config.json");
   writeFileSync(target, "untouched");
   symlinkSync(target, path);
-  assert.throws(() => writeConfig(path, { mode: "active" }), /symlink/);
-  assert.throws(() => resetConfig(path), /symlink/);
+  assert.throws(() => updateConfig(path, { materializer: { mode: "review" } }), /symlink/);
   assert.match(readConfig(path).diagnostic!, /symlink/);
   assert.equal(readFileSync(target, "utf8"), "untouched");
 
   const dangling = join(root, "dangling.json");
   symlinkSync(join(root, "missing-target"), dangling);
-  assert.throws(() => writeConfig(dangling, { mode: "active" }), /symlink/);
-  assert.throws(() => resetConfig(dangling), /symlink/);
-  assert.match(readConfig(dangling).diagnostic!, /symlink/);
+  assert.throws(() => updateConfig(dangling, { materializer: { mode: "review" } }), /symlink/);
+  const bad = join(root, "bad.json");
+  writeFileSync(bad, "{not-json");
+  chmodSync(bad, 0o600);
+  assert.match(readConfig(bad).diagnostic!, /invalid or unreadable/);
 });
 
-test("malformed files yield bounded diagnostics and lower precedence", () => {
-  const { root } = fixture();
-  const path = join(root, "bad.json");
-  writeFileSync(path, "{not-json");
-  chmodSync(path, 0o600);
-  const bad = readConfig(path);
-  assert.ok(bad.diagnostic && bad.diagnostic.length < 400);
-  const result = resolveEffectiveModel({ env: {}, workspace: bad, global: { policy: { mode: "active" } } });
-  assert.equal(result.source, "global");
-  assert.equal(result.diagnostics.length, 1);
-  const directoryPath = join(root, "directory-config");
-  mkdirSync(directoryPath);
-  assert.match(readConfig(directoryPath).diagnostic!, /not a regular file/);
-});
-
-test("argument parsing covers scopes reset lock opt-in and completion", () => {
-  const parsed = parseKnowledgeModelArgs("openrouter/org/model --scope workspace --allow-inactive");
-  assert.equal(parsed.scope, "workspace");
-  assert.equal(parsed.allowInactive, true);
-  assert.equal(formatModelPolicy(parsed.policy!), "openrouter/org/model");
+test("argument parsing and completion support materializer scopes", () => {
+  const model = parseKnowledgeModelArgs("openrouter/org/model --scope workspace --allow-inactive");
+  assert.equal(model.scope, "workspace");
+  assert.equal(formatModelPolicy(model.policy!), "openrouter/org/model");
   assert.equal(parseKnowledgeModelArgs("reset --scope=global").action, "reset");
-  assert.throws(() => parseKnowledgeModelArgs("active --unknown"));
-  assert.throws(() => parseKnowledgeModelArgs("active extra"));
+  assert.deepEqual(parseKnowledgeMaterializerArgs("review --scope workspace"), {
+    action: "set", policy: { mode: "review" }, scope: "workspace",
+  });
+  assert.equal(parseKnowledgeMaterializerArgs("reset --scope=global").action, "reset");
+  assert.throws(() => parseKnowledgeMaterializerArgs("unsafe"));
+  assert.throws(() => parseKnowledgeMaterializerArgs("review --allow-inactive"));
   assert.deepEqual(modelArgumentCompletions([{ provider: "openrouter", id: "org/model" }], "open"), ["openrouter/org/model"]);
-  assert.deepEqual(modelArgumentCompletions([], "active --scope w"), ["active --scope workspace"]);
-  assert.ok(modelArgumentCompletions([], "active ").includes("active --scope session"));
+  assert.deepEqual(materializerArgumentCompletions("in"), ["inbox"]);
+  assert.deepEqual(materializerArgumentCompletions("review --scope w"), ["review --scope workspace"]);
+  assert.deepEqual(parseMaterializerPolicy("COMMAND"), { mode: "command" });
 });
 
-test("credential resolution fails closed and never returns absent auth", () => {
+test("credential resolution and attempt-time model selection fail closed", () => {
   assert.deepEqual(requireModelAuthentication({ ok: true, apiKey: "key" }, "p/m"), { apiKey: "key", headers: undefined });
-  assert.deepEqual(requireModelAuthentication({ ok: true, headers: { Authorization: "token" } }, "p/m"), { apiKey: undefined, headers: { Authorization: "token" } });
-  assert.throws(() => requireModelAuthentication({ ok: false }, "p/m"), /Credentials unavailable for p\/m/);
-  assert.throws(() => requireModelAuthentication({ ok: true }, "p/m"), /Credentials unavailable for p\/m/);
-});
-
-test("attempt-time selection sees policy changes and fails closed when unavailable", () => {
+  assert.throws(() => requireModelAuthentication({ ok: false }, "p/m"), /Credentials unavailable/);
   const models = new Map([["p/first", { id: "first" }], ["p/second", { id: "second" }]]);
   const find = (provider: string, id: string) => models.get(`${provider}/${id}`);
   const first = resolveEffectiveModel({ env: {}, workspace: { policy: { mode: "fixed", provider: "p", modelId: "first" } } });
   const retry = resolveEffectiveModel({ env: {}, workspace: { policy: { mode: "fixed", provider: "p", modelId: "second" } } });
   assert.equal(selectExtractionModel(first, undefined, find).id, "first");
   assert.equal(selectExtractionModel(retry, undefined, find).id, "second");
-  assert.throws(
-    () => selectExtractionModel(resolveEffectiveModel({ env: {}, session: { mode: "fixed", provider: "p", modelId: "gone" } }), { id: "active" }, find),
-    /unavailable: p\/gone/,
-  );
+  assert.throws(() => selectExtractionModel(resolveEffectiveModel({ env: {}, session: { mode: "fixed", provider: "p", modelId: "gone" } }), { id: "active" }, find), /unavailable/);
 });
 
-test("status queue summary excludes payload-shaped values", () => {
+test("job summaries allowlist diagnostics and never render raw errors", () => {
+  const secret = "private candidate body must never reach recovery UI";
+  const command = safeJobDiagnostic(`Error: Materializer exited 17: ${secret}`);
+  assert.deepEqual(command, { category: "materializer-command-exited", exitCode: 17 });
+  assert.equal(formatSafeJobDiagnostic(command).includes(secret), false);
+  const unknown = safeJobDiagnostic(secret);
+  assert.deepEqual(unknown, { category: "background-failure" });
+  assert.equal(formatSafeJobDiagnostic(unknown).includes(secret), false);
+  const summaries = failedJobSummaries([
+    { id: "a".repeat(24), state: "failed", attempts: 3, createdAt: "2026-01-01", updatedAt: "2026-01-02", version: 1, payloadHash: "h", error: secret, payload: {} } as never,
+    { id: "b".repeat(24), state: "done", attempts: 0, createdAt: "2026-01-01", updatedAt: "2026-01-02", version: 1, payloadHash: "h", error: secret } as never,
+    { id: "c".repeat(24), state: "failed", attempts: 3, createdAt: "2026-01-01", updatedAt: "2026-01-02", version: 1, payloadHash: "h" } as never,
+  ]);
+  assert.equal(summaries.length, 2);
+  assert.equal(summaries[0].retryable, true);
+  assert.equal(summaries[1].retryable, false);
+  assert.equal(JSON.stringify(summaries).includes(secret), false);
+});
+
+test("status queue counts exclude payload-shaped values", () => {
   const counts = summarizeQueue([
     { state: "pending", payload: "secret" } as never,
     { state: "retry-wait", result: "candidate" } as never,

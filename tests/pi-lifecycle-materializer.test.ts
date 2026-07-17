@@ -51,13 +51,27 @@ test("command mode passes JSON on stdin and does not interpret shell syntax", as
   assert.throws(() => readFileSync(marker));
 });
 
-test("invalid materializer configuration fails closed", () => {
+test("empty command candidate list is successful no-op and never spawns argv", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sk-command-empty-"));
+  const marker = join(cwd, "spawned");
+  const argv = [process.execPath, "-e", `require('fs').writeFileSync(${JSON.stringify(marker)}, 'spawned')`];
+  const result = await materializeCandidates({ mode: "command", argv }, [], cwd);
+  assert.deepEqual(result, { mode: "command", written: [] });
+  assert.throws(() => readFileSync(marker));
+});
+
+test("invalid materializer configuration and command failure fail closed", async () => {
   assert.throws(
     () => parseMaterializerConfig({ SHARED_KNOWLEDGE_MATERIALIZER: "command" }),
-    /requires SHARED_KNOWLEDGE_MATERIALIZER_COMMAND/,
+    /binding is unavailable/,
   );
   assert.throws(
     () => parseMaterializerConfig({ SHARED_KNOWLEDGE_MATERIALIZER: "unsafe" }),
-    /Unsupported materializer mode/,
+    /Invalid SHARED_KNOWLEDGE_MATERIALIZER/,
+  );
+  const cwd = mkdtempSync(join(tmpdir(), "sk-command-fail-"));
+  await assert.rejects(
+    materializeCandidates({ mode: "command", argv: [process.execPath, "-e", "process.exit(7)"] }, [candidate], cwd),
+    /Materializer exited 7/,
   );
 });

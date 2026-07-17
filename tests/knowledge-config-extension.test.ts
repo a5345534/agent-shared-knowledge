@@ -6,7 +6,16 @@ import test from "node:test";
 import sharedKnowledgeLifecycle from "../.pi/extensions/shared-knowledge-lifecycle.ts";
 import { createCapturedPayload, KnowledgeJobQueue } from "../src/knowledge-job-runtime.ts";
 
-test("extension registers commands, isolates sessions, completes exact models, and never changes foreground model", async () => {
+function saveEnv(name: string): string | undefined {
+  return process.env[name];
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+test("extension configures materializers and recovers jobs without foreground mutation or payload disclosure", async () => {
   const commands = new Map<string, any>();
   const events = new Map<string, Array<(...args: any[]) => unknown>>();
   let foregroundChanges = 0;
@@ -18,26 +27,46 @@ test("extension registers commands, isolates sessions, completes exact models, a
     setModel() { foregroundChanges += 1; },
   };
   sharedKnowledgeLifecycle(pi as never);
-  assert.deepEqual([...commands.keys()].sort(), ["knowledge-config", "knowledge-model", "knowledge-status"]);
+  assert.deepEqual([...commands.keys()].sort(), [
+    "knowledge-config", "knowledge-jobs", "knowledge-materializer", "knowledge-model", "knowledge-status",
+  ]);
 
   const root = mkdtempSync(join(tmpdir(), "knowledge-config-extension-"));
-  const oldRuntime = process.env.SHARED_KNOWLEDGE_RUNTIME_DIR;
-  const oldAgent = process.env.PI_CODING_AGENT_DIR;
-  const oldModel = process.env.SHARED_KNOWLEDGE_EXTRACTION_MODEL;
+  const previous = Object.fromEntries([
+    "SHARED_KNOWLEDGE_RUNTIME_DIR",
+    "PI_CODING_AGENT_DIR",
+    "SHARED_KNOWLEDGE_EXTRACTION_MODEL",
+    "SHARED_KNOWLEDGE_MATERIALIZER",
+    "SHARED_KNOWLEDGE_MATERIALIZER_COMMAND",
+    "SHARED_KNOWLEDGE_ASYNC_EXTRACTION",
+  ].map((name) => [name, saveEnv(name)]));
   process.env.SHARED_KNOWLEDGE_RUNTIME_DIR = join(root, "runtime");
   process.env.PI_CODING_AGENT_DIR = join(root, "agent");
   delete process.env.SHARED_KNOWLEDGE_EXTRACTION_MODEL;
+  process.env.SHARED_KNOWLEDGE_MATERIALIZER = "command";
+  process.env.SHARED_KNOWLEDGE_MATERIALIZER_COMMAND = JSON.stringify([process.execPath, "-e", "process.exit(0)"]);
+  delete process.env.SHARED_KNOWLEDGE_ASYNC_EXTRACTION;
+
   try {
     const models = [
       { provider: "openrouter", id: "anthropic/claude-sonnet-4" },
       { provider: "openai", id: "gpt-test" },
     ];
     const notifications: string[] = [];
+    const selections: Array<string | undefined> = [];
+    const confirmations: boolean[] = [];
+    const selectionCalls: Array<{ title: string; options: string[] }> = [];
+    let idle = false;
     const workspace = join(root, "workspace");
     const queue = new KnowledgeJobQueue(workspace);
-    const queued = queue.enqueue(createCapturedPayload(workspace, "other-process", "A durable architecture decision must remain private and deterministic. ".repeat(10)));
-    queue.update(queued.job.id, { state: "running" });
-    const makeContext = (session: object) => ({
+    const secret = "private candidate body must never be shown";
+    const failed = queue.enqueue(createCapturedPayload(workspace, "other-process", "A durable architecture decision must remain private and deterministic. ".repeat(10))).job;
+    queue.update(failed.id, { state: "failed", attempts: 3, error: `Error: Materializer exited 7: ${secret}` });
+    const running = queue.enqueue(createCapturedPayload(workspace, "other-running", "A separate durable policy decision must remain private and deterministic. ".repeat(10))).job;
+    queue.update(running.id, { state: "running" });
+
+    const session = { marker: "session" };
+    const ctx = {
       cwd: workspace,
       mode: "tui",
       hasUI: true,
@@ -50,51 +79,89 @@ test("extension registers commands, isolates sessions, completes exact models, a
       },
       ui: {
         notify: (message: string) => notifications.push(message),
-        select: async (): Promise<string | undefined> => undefined,
-        confirm: async () => true,
+        select: async (title: string, options: string[]) => {
+          selectionCalls.push({ title, options });
+          return selections.shift();
+        },
+        confirm: async () => confirmations.shift() ?? true,
         setWidget() {}, setStatus() {},
       },
-      isIdle: () => true,
-    });
-    const first = makeContext({ first: true });
-    const second = makeContext({ second: true });
-    for (const handler of events.get("session_start") ?? []) await handler({ type: "session_start", reason: "startup" }, first);
+      isIdle: () => idle,
+    };
+    for (const handler of events.get("session_start") ?? []) await handler({ type: "session_start", reason: "startup" }, ctx);
 
-    const completions = commands.get("knowledge-model").getArgumentCompletions("");
-    assert.ok(completions.some((item: any) => item.value === "openrouter/anthropic/claude-sonnet-4"));
-    await commands.get("knowledge-model").handler("openrouter/anthropic/claude-sonnet-4 --scope session", first);
-    await commands.get("knowledge-status").handler("", first);
-    assert.match(notifications.at(-1)!, /openrouter\/anthropic\/claude-sonnet-4/);
-    assert.match(notifications.at(-1)!, /Source: session/);
-    assert.match(notifications.at(-1)!, /running=1/);
-    assert.equal(queue.read(queued.job.id)?.state, "running", "status must not recover/mutate running jobs");
+    await commands.get("knowledge-status").handler("", ctx);
+    assert.match(notifications.at(-1)!, /Materializer: command/);
+    assert.match(notifications.at(-1)!, /Materializer source: environment/);
+    assert.match(notifications.at(-1)!, /Command binding: available/);
+    assert.equal(notifications.at(-1)!.includes("process.exit"), false);
+    assert.equal(queue.read(running.id)?.state, "running", "passive status must not recover running jobs");
 
-    await commands.get("knowledge-status").handler("", second);
-    assert.match(notifications.at(-1)!, /active-provider\/active-model/);
-    assert.match(notifications.at(-1)!, /Source: active/);
+    await commands.get("knowledge-materializer").handler("review --scope workspace", ctx);
+    await commands.get("knowledge-status").handler("", ctx);
+    assert.match(notifications.at(-1)!, /Materializer: review/);
+    assert.match(notifications.at(-1)!, /Materializer source: workspace/);
 
-    const modelSelections = ["workspace", "active"];
-    second.ui.select = async () => modelSelections.shift();
-    await commands.get("knowledge-model").handler("", second);
-    await commands.get("knowledge-status").handler("", second);
-    assert.match(notifications.at(-1)!, /Source: workspace/);
-    const resetSelections = ["Reset a scope", "workspace"];
-    second.ui.select = async () => resetSelections.shift();
-    await commands.get("knowledge-config").handler("", second);
-    await commands.get("knowledge-status").handler("", second);
-    assert.match(notifications.at(-1)!, /Source: active/);
+    selections.push("Change materializer", "session", "inbox");
+    confirmations.push(false);
+    await commands.get("knowledge-config").handler("", ctx);
+    await commands.get("knowledge-status").handler("", ctx);
+    assert.match(notifications.at(-1)!, /Materializer source: workspace/, "declined inbox must not change policy");
+
+    delete process.env.SHARED_KNOWLEDGE_MATERIALIZER_COMMAND;
+    await commands.get("knowledge-materializer").handler("command --scope session", ctx);
+    assert.match(notifications.at(-1)!, /binding is unavailable/);
+    process.env.SHARED_KNOWLEDGE_MATERIALIZER_COMMAND = JSON.stringify([process.execPath, "-e", "process.exit(0)"]);
+    confirmations.push(true);
+    await commands.get("knowledge-materializer").handler("command --scope session", ctx);
+    await commands.get("knowledge-status").handler("", ctx);
+    assert.match(notifications.at(-1)!, /Materializer: command/);
+    assert.match(notifications.at(-1)!, /Materializer source: session/);
+    assert.equal(notifications.at(-1)!.includes("process.exit"), false);
+    await commands.get("knowledge-materializer").handler("reset --scope session", ctx);
+
+    const jobLabel = () => {
+      const current = queue.read(failed.id)!;
+      return `${current.id} · failed · attempts=${current.attempts} · created=${current.createdAt} · updated=${current.updatedAt} · model=${current.modelHint ?? "unknown"} · materializer command exited (7) · retryable`;
+    };
+    selections.push("Retry one failed job (1)", jobLabel());
+    confirmations.push(true);
+    await commands.get("knowledge-jobs").handler("", ctx);
+    assert.equal(queue.read(failed.id)?.state, "pending");
+    assert.equal(queue.read(failed.id)?.attempts, 0);
+    assert.equal(queue.read(running.id)?.state, "running", "recovery UI must not alter unrelated running job");
+    assert.equal(JSON.stringify(notifications).includes(secret), false);
+    assert.ok(selectionCalls.some((call) => call.options.includes("Retry all retryable failed jobs (1)")));
+
+    queue.update(failed.id, { state: "failed", attempts: 3, error: `Error: Materializer exited 7: ${secret}` });
+    selections.push("Set workspace review mode and retry all (1)");
+    confirmations.push(true);
+    await commands.get("knowledge-jobs").handler("", ctx);
+    assert.equal(queue.read(failed.id)?.state, "pending");
+    await commands.get("knowledge-status").handler("", ctx);
+    assert.match(notifications.at(-1)!, /Materializer: review/);
     assert.equal(foregroundChanges, 0);
     assert.equal(JSON.stringify(notifications).includes("not-persisted"), false);
 
-    process.env.SHARED_KNOWLEDGE_EXTRACTION_MODEL = "malformed";
-    await commands.get("knowledge-model").handler("active --scope session", first);
-    assert.match(notifications.at(-1)!, /--allow-inactive/);
-    await commands.get("knowledge-status").handler("", first);
-    assert.match(notifications.at(-1)!, /invalid environment value/);
-    assert.match(notifications.at(-1)!, /locked by environment/);
+    // Let the scheduled worker run with no active model. It may retry the
+    // selected job, but must not recover another process's running job.
+    queue.update(failed.id, { state: "failed", attempts: 3, error: secret });
+    selections.push("Retry one failed job (1)", jobLabel());
+    confirmations.push(true);
+    const savedModel = ctx.model;
+    (ctx as any).model = undefined;
+    idle = true;
+    await commands.get("knowledge-jobs").handler("", ctx);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(queue.read(running.id)?.state, "running", "scheduled retry must not recover unrelated running job");
+    (ctx as any).model = savedModel;
+    idle = false;
+
+    const nonUi = { ...ctx, hasUI: false, mode: "print" };
+    queue.update(failed.id, { state: "failed", attempts: 3, error: secret });
+    await commands.get("knowledge-jobs").handler("", nonUi);
+    assert.equal(queue.read(failed.id)?.state, "failed", "non-TUI jobs command must not retry");
   } finally {
-    if (oldRuntime === undefined) delete process.env.SHARED_KNOWLEDGE_RUNTIME_DIR; else process.env.SHARED_KNOWLEDGE_RUNTIME_DIR = oldRuntime;
-    if (oldAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldAgent;
-    if (oldModel === undefined) delete process.env.SHARED_KNOWLEDGE_EXTRACTION_MODEL; else process.env.SHARED_KNOWLEDGE_EXTRACTION_MODEL = oldModel;
+    for (const [name, value] of Object.entries(previous)) restoreEnv(name, value);
   }
 });

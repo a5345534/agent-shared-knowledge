@@ -16,24 +16,31 @@ import {
 } from "../../src/knowledge-job-runtime.ts";
 import {
   materializeCandidates,
-  parseMaterializerConfig,
   validateCandidate,
   type Candidate,
 } from "../../src/pi-lifecycle-materializer.ts";
 import {
+  commandBinding,
+  failedJobSummaries,
+  formatMaterializerPolicy,
   formatModelPolicy,
+  formatSafeJobDiagnostic,
   globalConfigPath,
+  materializerArgumentCompletions,
   modelArgumentCompletions,
+  parseKnowledgeMaterializerArgs,
   parseKnowledgeModelArgs,
   readConfig,
+  requireMaterializerConfig,
   requireModelAuthentication,
-  resetConfig,
+  resolveEffectiveMaterializer,
   resolveEffectiveModel,
   selectExtractionModel,
   summarizeQueue,
+  updateConfig,
   workspaceConfigPath,
-  writeConfig,
   type ConfigScope,
+  type MaterializerPolicy,
   type ModelPolicy,
 } from "../../src/knowledge-config-runtime.ts";
 import {
@@ -102,49 +109,75 @@ function promptText(): string {
 
 export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
   const queues = new Map<string, KnowledgeJobQueue>();
-  const sessionPolicies = new Map<object | string, ModelPolicy>();
+  const sessionModelPolicies = new Map<object | string, ModelPolicy>();
+  const sessionMaterializerPolicies = new Map<object | string, MaterializerPolicy>();
   let availableModels: Array<{ provider: string; id: string }> = [];
-  const queueFor = (cwd: string) => {
+
+  const queueFor = (cwd: string, recoverInterrupted = true) => {
     let queue = queues.get(cwd);
     if (!queue) {
       queue = new KnowledgeJobQueue(cwd);
-      queue.recoverRunning();
+      // Initial lifecycle acquisition recovers an interrupted prior process.
+      // Explicit retry must not recover or mutate unrelated running jobs.
+      if (recoverInterrupted) queue.recoverRunning();
       queues.set(cwd, queue);
     }
     return queue;
   };
-  const sessionPolicyFor = (ctx: ExtensionContext) => {
-    const direct = sessionPolicies.get(ctx.sessionManager);
+  // Passive status/recovery views must never call recoverRunning().
+  const viewQueueFor = (cwd: string) => queues.get(cwd) ?? new KnowledgeJobQueue(cwd);
+  const sessionPolicyFor = <T,>(policies: Map<object | string, T>, ctx: ExtensionContext): T | undefined => {
+    const direct = policies.get(ctx.sessionManager);
     const file = ctx.sessionManager.getSessionFile();
-    return direct ?? (file ? sessionPolicies.get(file) : undefined);
+    return direct ?? (file ? policies.get(file) : undefined);
   };
-  const effectiveFor = (ctx: ExtensionContext) => resolveEffectiveModel({
-    session: sessionPolicyFor(ctx),
+  const updateSessionPolicy = <T,>(policies: Map<object | string, T>, ctx: ExtensionContext, policy?: T) => {
+    const file = ctx.sessionManager.getSessionFile();
+    if (policy) {
+      policies.set(ctx.sessionManager, policy);
+      if (file) policies.set(file, policy);
+    } else {
+      policies.delete(ctx.sessionManager);
+      if (file) policies.delete(file);
+    }
+  };
+  const persistentConfigFor = (ctx: ExtensionContext) => ({
     workspace: readConfig(workspaceConfigPath(ctx.cwd)),
     global: readConfig(globalConfigPath(getAgentDir())),
   });
+  const effectiveModelFor = (ctx: ExtensionContext) => {
+    const config = persistentConfigFor(ctx);
+    return resolveEffectiveModel({
+      session: sessionPolicyFor(sessionModelPolicies, ctx),
+      workspace: config.workspace,
+      global: config.global,
+    });
+  };
+  const effectiveMaterializerFor = (ctx: ExtensionContext) => {
+    const config = persistentConfigFor(ctx);
+    return resolveEffectiveMaterializer({
+      session: sessionPolicyFor(sessionMaterializerPolicies, ctx),
+      workspace: config.workspace,
+      global: config.global,
+    });
+  };
   const refreshAvailableModels = (ctx: ExtensionContext) => {
     availableModels = ctx.modelRegistry.getAvailable().map((model) => ({ provider: model.provider, id: model.id }));
     return availableModels;
   };
-  const updateScope = (ctx: ExtensionContext, scope: ConfigScope, policy?: ModelPolicy) => {
-    if (scope === "session") {
-      const file = ctx.sessionManager.getSessionFile();
-      if (policy) {
-        sessionPolicies.set(ctx.sessionManager, policy);
-        if (file) sessionPolicies.set(file, policy);
-      } else {
-        sessionPolicies.delete(ctx.sessionManager);
-        if (file) sessionPolicies.delete(file);
-      }
-      return;
-    }
-    const path = scope === "workspace" ? workspaceConfigPath(ctx.cwd) : globalConfigPath(getAgentDir());
-    if (policy) writeConfig(path, policy);
-    else resetConfig(path);
+  const scopedPath = (ctx: ExtensionContext, scope: Exclude<ConfigScope, "session">) => {
+    return scope === "workspace" ? workspaceConfigPath(ctx.cwd) : globalConfigPath(getAgentDir());
   };
-  const permitInactiveWrite = async (ctx: ExtensionContext, allowInactive: boolean, interactive: boolean) => {
-    const effective = effectiveFor(ctx);
+  const updateModelScope = (ctx: ExtensionContext, scope: ConfigScope, policy?: ModelPolicy) => {
+    if (scope === "session") return updateSessionPolicy(sessionModelPolicies, ctx, policy);
+    updateConfig(scopedPath(ctx, scope), { extractionModel: policy ?? null });
+  };
+  const updateMaterializerScope = (ctx: ExtensionContext, scope: ConfigScope, policy?: MaterializerPolicy) => {
+    if (scope === "session") return updateSessionPolicy(sessionMaterializerPolicies, ctx, policy);
+    updateConfig(scopedPath(ctx, scope), { materializer: policy ?? null });
+  };
+  const permitInactiveModelWrite = async (ctx: ExtensionContext, allowInactive: boolean, interactive: boolean) => {
+    const effective = effectiveModelFor(ctx);
     if (!effective.locked) return true;
     if (allowInactive) return true;
     if (interactive) {
@@ -156,25 +189,27 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     throw new Error("environment override is locked; pass --allow-inactive to change a lower scope");
   };
   const statusText = (ctx: ExtensionContext) => {
-    const effective = effectiveFor(ctx);
-    // Status must not call queueFor(): recovery mutates durable running jobs and
-    // could interfere with another Pi process. A view queue only reads states.
-    const queue = queues.get(ctx.cwd) ?? new KnowledgeJobQueue(ctx.cwd);
+    const model = effectiveModelFor(ctx);
+    const materializer = effectiveMaterializerFor(ctx);
+    const queue = viewQueueFor(ctx.cwd);
     const counts = summarizeQueue(queue.list());
-    const configured = effective.policy ? formatModelPolicy(effective.policy) : "invalid environment value";
-    const activeDetail = effective.policy?.mode === "active"
+    const configuredModel = model.policy ? formatModelPolicy(model.policy) : "invalid environment value";
+    const activeDetail = model.policy?.mode === "active"
       ? ` → ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "no active model"}`
       : "";
-    let materializer = "invalid";
-    try { materializer = parseMaterializerConfig().mode; } catch { /* bounded status only */ }
+    const configuredMaterializer = materializer.policy ? formatMaterializerPolicy(materializer.policy) : "invalid";
     return [
-      `Extraction model: ${configured}${activeDetail}`,
-      `Source: ${effective.source}${effective.locked ? " (locked by environment)" : ""}`,
-      effective.error ? `Error: ${effective.error.slice(0, 240)}` : undefined,
-      `Materializer: ${materializer}`,
+      `Extraction model: ${configuredModel}${activeDetail}`,
+      `Source: ${model.source}${model.locked ? " (locked by environment)" : ""}`,
+      model.error ? `Model configuration error: ${model.error.slice(0, 240)}` : undefined,
+      `Materializer: ${configuredMaterializer}`,
+      `Materializer source: ${materializer.source}`,
+      materializer.policy?.mode === "command" ? `Command binding: ${materializer.commandBindingAvailable ? "available" : "unavailable"}` : undefined,
+      materializer.error ? "Materializer configuration error" : undefined,
       `Runtime: ${queue.root}`,
       `Jobs: pending=${counts.pending} running=${counts.running} retry-wait=${counts["retry-wait"]} failed=${counts.failed} review-ready=${counts["review-ready"]}`,
-      ...effective.diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),
+      ...model.diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),
+      ...materializer.diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),
     ].filter((line): line is string => Boolean(line)).join("\n");
   };
   const showStatus = (ctx: ExtensionContext) => ctx.ui.notify(statusText(ctx), "info");
@@ -182,7 +217,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     const selected = await ctx.ui.select("Configuration scope", ["session", "workspace", "global"]);
     return selected as ConfigScope | undefined;
   };
-  const configureInteractively = async (ctx: ExtensionContext, reset = false) => {
+  const configureModelInteractively = async (ctx: ExtensionContext, reset = false) => {
     if (!ctx.hasUI) {
       ctx.ui.notify("Use /knowledge-model <active|provider/model|reset> --scope <scope> outside TUI mode.", "warning");
       return;
@@ -196,9 +231,115 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       if (!selected) return;
       policy = parseKnowledgeModelArgs(selected).policy;
     }
-    if (!await permitInactiveWrite(ctx, false, true)) return;
-    updateScope(ctx, scope, policy);
-    ctx.ui.notify(`Shared Knowledge ${reset ? "reset" : "model saved"} for ${scope}.\n${statusText(ctx)}`, "info");
+    if (!await permitInactiveModelWrite(ctx, false, true)) return;
+    updateModelScope(ctx, scope, policy);
+    ctx.ui.notify(`Shared Knowledge ${reset ? "model reset" : "model saved"} for ${scope}.\n${statusText(ctx)}`, "info");
+  };
+  const confirmMaterializerAuthority = async (ctx: ExtensionContext, policy: MaterializerPolicy) => {
+    if (policy.mode === "review") return true;
+    if (!ctx.hasUI) throw new Error(`${policy.mode} materializer requires dialog-capable confirmation`);
+    const message = policy.mode === "inbox"
+      ? "Successful jobs can write knowledge/inbox files and invoke ordered no-git absorption. Continue?"
+      : "Successful jobs delegate validated candidate JSON to an externally configured command binding. Continue?";
+    return ctx.ui.confirm(`Confirm ${policy.mode} materializer`, message);
+  };
+  const configureMaterializerInteractively = async (ctx: ExtensionContext, reset = false) => {
+    if (!ctx.hasUI) {
+      ctx.ui.notify("Use /knowledge-materializer <review|inbox|command|reset> --scope <scope> outside TUI mode.", "warning");
+      return;
+    }
+    const scope = await chooseScope(ctx);
+    if (!scope) return;
+    let policy: MaterializerPolicy | undefined;
+    if (!reset) {
+      const selected = await ctx.ui.select("Background materializer", ["review", "inbox", "command"]);
+      if (!selected) return;
+      policy = parseKnowledgeMaterializerArgs(selected).policy;
+      if (policy?.mode === "command" && !commandBinding().available) {
+        ctx.ui.notify("shared-knowledge config: command materializer binding is unavailable", "error");
+        return;
+      }
+      if (policy && !await confirmMaterializerAuthority(ctx, policy)) return;
+    }
+    updateMaterializerScope(ctx, scope, policy);
+    ctx.ui.notify(`Shared Knowledge ${reset ? "materializer reset" : "materializer saved"} for ${scope}.\n${statusText(ctx)}`, "info");
+  };
+
+  const requeueIds = (ctx: ExtensionContext, ids: string[]) => {
+    // Adopt a view queue without recovery before scheduling so an explicit
+    // retry cannot turn another process's running job back into pending.
+    const queue = queueFor(ctx.cwd, false);
+    const requeued: string[] = [];
+    for (const id of ids) {
+      try {
+        queue.retryFailed(id);
+        requeued.push(id);
+      } catch {
+        // A concurrent worker/operator may have made this job ineligible.
+      }
+    }
+    if (requeued.length > 0) schedule(ctx, 0);
+    return requeued;
+  };
+  const retryOneInteractively = async (ctx: ExtensionContext) => {
+    const failed = failedJobSummaries(viewQueueFor(ctx.cwd).list());
+    if (failed.length === 0) {
+      ctx.ui.notify("shared-knowledge: no failed jobs in this workspace", "info");
+      return;
+    }
+    const labels = new Map(failed.map((job) => [
+      `${job.id} · ${job.state} · attempts=${job.attempts} · created=${job.createdAt} · updated=${job.updatedAt} · model=${job.modelHint ?? "unknown"} · ${formatSafeJobDiagnostic(job.diagnostic)} · ${job.retryable ? "retryable" : "payload unavailable"}`,
+      job,
+    ]));
+    const selected = await ctx.ui.select("Select failed job", [...labels.keys()]);
+    const job = selected ? labels.get(selected) : undefined;
+    if (!job) return;
+    if (!job.retryable) {
+      ctx.ui.notify("shared-knowledge: selected job has no retained payload and cannot be retried", "warning");
+      return;
+    }
+    if (!await ctx.ui.confirm("Retry failed job", `Requeue ${job.id} for normal idle-gated processing?`)) return;
+    const requeued = requeueIds(ctx, [job.id]);
+    ctx.ui.notify(requeued.length === 1
+      ? `shared-knowledge: requeued ${job.id}; processing starts when idle`
+      : "shared-knowledge: selected job is no longer retryable", requeued.length === 1 ? "info" : "warning");
+  };
+  const retryAllInteractively = async (ctx: ExtensionContext, forceReview = false) => {
+    const eligible = failedJobSummaries(viewQueueFor(ctx.cwd).list()).filter((job) => job.retryable);
+    if (eligible.length === 0) {
+      ctx.ui.notify("shared-knowledge: no retained failed jobs are eligible for retry", "info");
+      return;
+    }
+    const title = forceReview ? "Set review mode and retry failed jobs" : "Retry failed jobs";
+    const detail = forceReview
+      ? `Set workspace materializer to review and requeue ${eligible.length} retained failed job(s)?`
+      : `Requeue ${eligible.length} retained failed job(s) for normal idle-gated processing?`;
+    if (!await ctx.ui.confirm(title, detail)) return;
+    try {
+      if (forceReview) updateMaterializerScope(ctx, "workspace", { mode: "review" });
+      const requeued = requeueIds(ctx, eligible.map((job) => job.id));
+      ctx.ui.notify(`shared-knowledge: ${forceReview ? "workspace review mode set; " : ""}requeued ${requeued.length}/${eligible.length} job(s); processing starts when idle`, "info");
+    } catch {
+      ctx.ui.notify("shared-knowledge: recovery configuration could not be saved; no jobs were requeued", "error");
+    }
+  };
+  const openJobsUi = async (ctx: ExtensionContext) => {
+    if (!ctx.hasUI) {
+      ctx.ui.notify(`${statusText(ctx)}\nUse dialog-capable UI for failed-job recovery.`, "info");
+      return;
+    }
+    const failed = failedJobSummaries(viewQueueFor(ctx.cwd).list());
+    const eligibleCount = failed.filter((job) => job.retryable).length;
+    const action = await ctx.ui.select("Shared Knowledge job recovery", [
+      `Retry one failed job (${eligibleCount})`,
+      `Retry all retryable failed jobs (${eligibleCount})`,
+      `Set workspace review mode and retry all (${eligibleCount})`,
+      "Show status",
+    ]);
+    if (action?.startsWith("Retry one")) await retryOneInteractively(ctx);
+    else if (action?.startsWith("Retry all")) await retryAllInteractively(ctx);
+    else if (action?.startsWith("Set workspace review")) await retryAllInteractively(ctx, true);
+    else if (action === "Show status") showStatus(ctx);
   };
 
   pi.registerCommand("knowledge-model", {
@@ -211,27 +352,58 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       try {
         refreshAvailableModels(ctx);
         const parsed = parseKnowledgeModelArgs(args);
-        if (!parsed.action) return configureInteractively(ctx);
-        if (!await permitInactiveWrite(ctx, parsed.allowInactive, false)) return;
+        if (!parsed.action) return configureModelInteractively(ctx);
+        if (!await permitInactiveModelWrite(ctx, parsed.allowInactive, false)) return;
         if (parsed.policy?.mode === "fixed") {
           const fixedPolicy = parsed.policy;
           const known = ctx.modelRegistry.getAvailable().some((model) => model.provider === fixedPolicy.provider && model.id === fixedPolicy.modelId);
           if (!known) throw new Error(`model is unavailable or unauthenticated: ${formatModelPolicy(fixedPolicy)}`);
         }
-        updateScope(ctx, parsed.scope, parsed.policy);
-        ctx.ui.notify(`Shared Knowledge ${parsed.action === "reset" ? "reset" : "model saved"} for ${parsed.scope}.\n${statusText(ctx)}`, "info");
+        updateModelScope(ctx, parsed.scope, parsed.policy);
+        ctx.ui.notify(`Shared Knowledge ${parsed.action === "reset" ? "model reset" : "model saved"} for ${parsed.scope}.\n${statusText(ctx)}`, "info");
+      } catch (error) {
+        ctx.ui.notify(`shared-knowledge config: ${String(error).slice(0, 300)}`, "error");
+      }
+    },
+  });
+  pi.registerCommand("knowledge-materializer", {
+    description: "Configure the Shared Knowledge materializer policy",
+    getArgumentCompletions: (prefix) => {
+      const values = materializerArgumentCompletions(prefix);
+      return values.length ? values.map((value) => ({ value, label: value })) : null;
+    },
+    handler: async (args, ctx) => {
+      try {
+        const parsed = parseKnowledgeMaterializerArgs(args);
+        if (!parsed.action) return configureMaterializerInteractively(ctx);
+        if (parsed.policy?.mode === "command" && !commandBinding().available) {
+          throw new Error("command materializer binding is unavailable");
+        }
+        if (parsed.policy && !await confirmMaterializerAuthority(ctx, parsed.policy)) return;
+        updateMaterializerScope(ctx, parsed.scope, parsed.policy);
+        ctx.ui.notify(`Shared Knowledge ${parsed.action === "reset" ? "materializer reset" : "materializer saved"} for ${parsed.scope}.\n${statusText(ctx)}`, "info");
       } catch (error) {
         ctx.ui.notify(`shared-knowledge config: ${String(error).slice(0, 300)}`, "error");
       }
     },
   });
   pi.registerCommand("knowledge-config", {
-    description: "Open Shared Knowledge configuration",
+    description: "Open Shared Knowledge configuration and recovery",
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) return showStatus(ctx);
-      const action = await ctx.ui.select("Shared Knowledge configuration", ["Change extraction model", "Reset a scope", "Show status"]);
-      if (action === "Change extraction model") await configureInteractively(ctx);
-      else if (action === "Reset a scope") await configureInteractively(ctx, true);
+      const action = await ctx.ui.select("Shared Knowledge configuration", [
+        "Change extraction model",
+        "Change materializer",
+        "Reset extraction model scope",
+        "Reset materializer scope",
+        "Recover failed jobs",
+        "Show status",
+      ]);
+      if (action === "Change extraction model") await configureModelInteractively(ctx);
+      else if (action === "Change materializer") await configureMaterializerInteractively(ctx);
+      else if (action === "Reset extraction model scope") await configureModelInteractively(ctx, true);
+      else if (action === "Reset materializer scope") await configureMaterializerInteractively(ctx, true);
+      else if (action === "Recover failed jobs") await openJobsUi(ctx);
       else if (action === "Show status") showStatus(ctx);
     },
   });
@@ -239,14 +411,21 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     description: "Show effective Shared Knowledge background configuration and queue counts",
     handler: async (_args, ctx) => showStatus(ctx),
   });
+  pi.registerCommand("knowledge-jobs", {
+    description: "Inspect and safely retry failed Shared Knowledge jobs",
+    handler: async (_args, ctx) => openJobsUi(ctx),
+  });
 
   const processOne = async (ctx: ExtensionContext, queue: KnowledgeJobQueue, job: KnowledgeJob) => {
     if (!job.payload || !isMeaningfulConversation(job.payload.conversation)) {
       queue.update(job.id, { state: "skipped", error: undefined });
       return;
     }
-    const effective = effectiveFor(ctx);
-    const model = selectExtractionModel(effective, ctx.model, (provider, modelId) => ctx.modelRegistry.find(provider, modelId));
+    const effectiveModel = effectiveModelFor(ctx);
+    // Resolve once per attempt so a policy change cannot switch authority
+    // between extraction and materialization of the same durable job.
+    const materializer = requireMaterializerConfig(effectiveMaterializerFor(ctx));
+    const model = selectExtractionModel(effectiveModel, ctx.model, (provider, modelId) => ctx.modelRegistry.find(provider, modelId));
     const auth = requireModelAuthentication(await ctx.modelRegistry.getApiKeyAndHeaders(model), `${model.provider}/${model.id}`);
     queue.update(job.id, { state: "running", modelHint: model.id, error: undefined });
     const controller = new AbortController();
@@ -282,7 +461,6 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
         evidence_paths: job.payload.source.evidencePaths ?? [],
       } : candidate)
       .filter((candidate) => validateCandidate(candidate).length === 0);
-    const materializer = parseMaterializerConfig();
     const result = await materializeCandidates(materializer, candidates, ctx.cwd);
     if (result.mode === "inbox" && result.written.length > 0) await runAbsorber(ctx.cwd);
     if (job.payload.source) {
@@ -368,17 +546,17 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       });
   };
 
-  const schedule = (ctx: ExtensionContext) => {
+  function schedule(ctx: ExtensionContext, delayMs = parseQueueConfig().debounceMs) {
     const cwd = ctx.cwd;
     const previous = timers.get(cwd);
     if (previous) clearTimeout(previous);
     const timer = setTimeout(() => {
       timers.delete(cwd);
       drain(ctx);
-    }, parseQueueConfig().debounceMs);
+    }, delayMs);
     timer.unref();
     timers.set(cwd, timer);
-  };
+  }
 
   pi.on("session_before_compact", (event, ctx) => {
     if (process.env.SHARED_KNOWLEDGE_ASYNC_EXTRACTION === "0") return;
@@ -412,8 +590,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     const timer = timers.get(ctx.cwd);
     if (timer) clearTimeout(timer);
     timers.delete(ctx.cwd);
-    sessionPolicies.delete(ctx.sessionManager);
-    const file = ctx.sessionManager.getSessionFile();
-    if (file) sessionPolicies.delete(file);
+    updateSessionPolicy(sessionModelPolicies, ctx);
+    updateSessionPolicy(sessionMaterializerPolicies, ctx);
   });
 }
