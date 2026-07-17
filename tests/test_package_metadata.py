@@ -13,6 +13,7 @@ def test_pi_peer_dependencies_and_typecheck_are_declared() -> None:
 
     assert package["peerDependencies"]["@earendil-works/pi-ai"] == "*"
     assert package["peerDependencies"]["@earendil-works/pi-coding-agent"] == "*"
+    assert package["peerDependencies"]["@earendil-works/pi-tui"] == "*"
     assert package["scripts"]["typecheck"] == "tsc --noEmit"
     assert "tsconfig.json" in package["files"]
     assert "src" in package["files"]

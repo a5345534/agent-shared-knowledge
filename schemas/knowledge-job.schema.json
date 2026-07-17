@@ -15,7 +15,8 @@
     "sourceInstance": { "type": "string" },
     "purgedAt": { "type": "string", "format": "date-time" },
     "error": { "type": "string", "maxLength": 500 },
-    "payload": { "$ref": "#/$defs/payload" }
+    "payload": { "$ref": "#/$defs/payload" },
+    "result": { "$ref": "#/$defs/result" }
   },
   "additionalProperties": true,
   "$defs": {
@@ -26,6 +27,41 @@
         "version": { "const": 1 }, "workspace": { "type": "string" }, "sessionId": { "type": "string" },
         "capturedAt": { "type": "string", "format": "date-time" }, "conversation": { "type": "string" },
         "truncated": { "type": "boolean" }, "originalBytes": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "result": {
+      "type": "object",
+      "required": ["candidateCount", "materializer", "written"],
+      "properties": {
+        "candidateCount": { "type": "integer", "minimum": 0 },
+        "materializer": { "enum": ["review", "inbox", "command"] },
+        "written": { "type": "array", "items": { "type": "string" } },
+        "reviewCandidates": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "reviewDecisions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["state"],
+            "properties": {
+              "state": { "enum": ["pending", "approved", "rejected"] },
+              "decidedAt": { "type": "string", "format": "date-time" },
+              "outcome": { "enum": ["staged", "already-staged"] },
+              "inboxPath": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "reviewSummary": {
+          "type": "object",
+          "required": ["pending", "approved", "rejected"],
+          "properties": {
+            "pending": { "type": "integer", "minimum": 0 },
+            "approved": { "type": "integer", "minimum": 0 },
+            "rejected": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": true
     }

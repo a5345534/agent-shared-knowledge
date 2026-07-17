@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  inboxCandidateIdentity,
+  materializeInboxCandidate,
   materializeCandidates,
   parseMaterializerConfig,
   type Candidate,
@@ -33,6 +35,32 @@ test("explicit inbox mode writes a candidate", async () => {
   assert.equal(result.mode, "inbox");
   assert.equal(result.written.length, 1);
   assert.match(readFileSync(join(cwd, result.written[0]), "utf8"), /candidate_id: safe-candidate/);
+});
+
+test("explicit review staging revalidates and deduplicates Inbox candidates", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sk-review-stage-"));
+  assert.equal(inboxCandidateIdentity(candidate), "safe-candidate");
+  const first = materializeInboxCandidate(candidate, cwd);
+  assert.equal(first.alreadyStaged, false);
+  assert.ok(first.written);
+  assert.match(readFileSync(join(cwd, first.written!), "utf8"), /candidate_id: safe-candidate/);
+  const second = materializeInboxCandidate(candidate, cwd);
+  assert.equal(second.alreadyStaged, true);
+  assert.equal(second.written, undefined);
+  assert.throws(
+    () => materializeInboxCandidate({ ...candidate, body: "too short" }, cwd),
+    /review candidate validation failed/,
+  );
+});
+
+test("review staging fails closed when a nonmatching target file already occupies the deterministic path", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sk-review-collision-"));
+  const inbox = join(cwd, "knowledge", "inbox");
+  mkdirSync(inbox, { recursive: true });
+  const target = join(inbox, `${new Date().toISOString().slice(0, 10)}-safe-candidate.md`);
+  writeFileSync(target, "not the candidate identity");
+  assert.throws(() => materializeInboxCandidate(candidate, cwd), /EEXIST/);
+  assert.equal(readFileSync(target, "utf8"), "not the candidate identity");
 });
 
 test("command mode passes JSON on stdin and does not interpret shell syntax", async () => {
