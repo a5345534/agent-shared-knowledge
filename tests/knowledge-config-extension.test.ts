@@ -38,12 +38,14 @@ test("extension configures materializers and recovers jobs without foreground mu
     "SHARED_KNOWLEDGE_EXTRACTION_MODEL",
     "SHARED_KNOWLEDGE_MATERIALIZER",
     "SHARED_KNOWLEDGE_MATERIALIZER_COMMAND",
+    "SHARED_KNOWLEDGE_ASYNC_EXTRACTION",
   ].map((name) => [name, saveEnv(name)]));
   process.env.SHARED_KNOWLEDGE_RUNTIME_DIR = join(root, "runtime");
   process.env.PI_CODING_AGENT_DIR = join(root, "agent");
   delete process.env.SHARED_KNOWLEDGE_EXTRACTION_MODEL;
   process.env.SHARED_KNOWLEDGE_MATERIALIZER = "command";
   process.env.SHARED_KNOWLEDGE_MATERIALIZER_COMMAND = JSON.stringify([process.execPath, "-e", "process.exit(0)"]);
+  delete process.env.SHARED_KNOWLEDGE_ASYNC_EXTRACTION;
 
   try {
     const models = [
@@ -137,6 +139,20 @@ test("extension configures materializers and recovers jobs without foreground mu
     assert.match(notifications.at(-1)!, /Materializer: review/);
     assert.equal(foregroundChanges, 0);
     assert.equal(JSON.stringify(notifications).includes("not-persisted"), false);
+
+    // Let the scheduled worker run with no active model. It may retry the
+    // selected job, but must not recover another process's running job.
+    queue.update(failed.id, { state: "failed", attempts: 3, error: secret });
+    selections.push("Retry one failed job (1)", jobLabel);
+    confirmations.push(true);
+    const savedModel = ctx.model;
+    (ctx as any).model = undefined;
+    idle = true;
+    await commands.get("knowledge-jobs").handler("", ctx);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(queue.read(running.id)?.state, "running", "scheduled retry must not recover unrelated running job");
+    (ctx as any).model = savedModel;
+    idle = false;
 
     const nonUi = { ...ctx, hasUI: false, mode: "print" };
     queue.update(failed.id, { state: "failed", attempts: 3, error: secret });

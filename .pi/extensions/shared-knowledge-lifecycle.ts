@@ -113,11 +113,13 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
   const sessionMaterializerPolicies = new Map<object | string, MaterializerPolicy>();
   let availableModels: Array<{ provider: string; id: string }> = [];
 
-  const queueFor = (cwd: string) => {
+  const queueFor = (cwd: string, recoverInterrupted = true) => {
     let queue = queues.get(cwd);
     if (!queue) {
       queue = new KnowledgeJobQueue(cwd);
-      queue.recoverRunning();
+      // Initial lifecycle acquisition recovers an interrupted prior process.
+      // Explicit retry must not recover or mutate unrelated running jobs.
+      if (recoverInterrupted) queue.recoverRunning();
       queues.set(cwd, queue);
     }
     return queue;
@@ -264,7 +266,9 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
   };
 
   const requeueIds = (ctx: ExtensionContext, ids: string[]) => {
-    const queue = viewQueueFor(ctx.cwd);
+    // Adopt a view queue without recovery before scheduling so an explicit
+    // retry cannot turn another process's running job back into pending.
+    const queue = queueFor(ctx.cwd, false);
     const requeued: string[] = [];
     for (const id of ids) {
       try {
