@@ -120,8 +120,11 @@ test("extension configures materializers and recovers jobs without foreground mu
     assert.equal(notifications.at(-1)!.includes("process.exit"), false);
     await commands.get("knowledge-materializer").handler("reset --scope session", ctx);
 
-    const jobLabel = `${failed.id} · attempts=3 · materializer command exited (7) · retryable`;
-    selections.push("Retry one failed job (1)", jobLabel);
+    const jobLabel = () => {
+      const current = queue.read(failed.id)!;
+      return `${current.id} · failed · attempts=${current.attempts} · created=${current.createdAt} · updated=${current.updatedAt} · model=${current.modelHint ?? "unknown"} · materializer command exited (7) · retryable`;
+    };
+    selections.push("Retry one failed job (1)", jobLabel());
     confirmations.push(true);
     await commands.get("knowledge-jobs").handler("", ctx);
     assert.equal(queue.read(failed.id)?.state, "pending");
@@ -143,7 +146,7 @@ test("extension configures materializers and recovers jobs without foreground mu
     // Let the scheduled worker run with no active model. It may retry the
     // selected job, but must not recover another process's running job.
     queue.update(failed.id, { state: "failed", attempts: 3, error: secret });
-    selections.push("Retry one failed job (1)", jobLabel);
+    selections.push("Retry one failed job (1)", jobLabel());
     confirmations.push(true);
     const savedModel = ctx.model;
     (ctx as any).model = undefined;

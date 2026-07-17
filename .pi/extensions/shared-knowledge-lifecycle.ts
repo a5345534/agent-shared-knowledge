@@ -288,7 +288,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       return;
     }
     const labels = new Map(failed.map((job) => [
-      `${job.id} · attempts=${job.attempts} · ${formatSafeJobDiagnostic(job.diagnostic)} · ${job.retryable ? "retryable" : "payload unavailable"}`,
+      `${job.id} · ${job.state} · attempts=${job.attempts} · created=${job.createdAt} · updated=${job.updatedAt} · model=${job.modelHint ?? "unknown"} · ${formatSafeJobDiagnostic(job.diagnostic)} · ${job.retryable ? "retryable" : "payload unavailable"}`,
       job,
     ]));
     const selected = await ctx.ui.select("Select failed job", [...labels.keys()]);
