@@ -386,6 +386,40 @@ Jobs whose retained payload has expired are shown as non-retryable. A command
 materializer receiving zero validated candidates now succeeds as a no-op and is
 not spawned.
 
+### Interactive review-ready approval
+
+Use the dedicated local TUI to inspect candidates retained by the safe `review`
+materializer:
+
+```text
+/knowledge-review
+```
+
+The first screen contains only redacted `review-ready` job metadata. After you
+explicitly select a job, Pi shows one candidate at a time in a plaintext,
+keyboard-driven viewer:
+
+```text
+↑↓ scroll · ←→ candidate · A approve to Inbox · R reject · S defer · Esc back
+```
+
+`A` always asks for confirmation. Approval stages exactly one validated candidate
+under `knowledge/inbox/`; it does **not** call a model, command materializer,
+absorber, Git staging/commit, or canonical promotion. Review decisions are
+private durable queue state. After staging, use the normal deterministic flow:
+
+```bash
+knowledge-absorb --root . plan
+knowledge-absorb --root . apply --safe-only
+```
+
+`R` records a private rejection without changing the checkout; `S` leaves the
+candidate pending. Content is deliberately rendered only in the explicitly
+opened local TUI. `/knowledge-status`, `/knowledge-jobs`, CLI `status`, RPC,
+print, and JSON modes remain redacted; use an interactive local Pi terminal to
+review. Candidate and decision detail follows the normal terminal retention
+window and becomes unavailable after purge.
+
 ### Background job operations
 
 Runtime payloads are stored outside tracked checkout content (prefer Git-private

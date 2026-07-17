@@ -8,17 +8,26 @@ import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import {
   KnowledgeJobQueue,
+  batchFollowerPatch,
   createCapturedPayload,
+  createReviewResult,
   isMeaningfulConversation,
   normalizeConversation,
   parseQueueConfig,
   type KnowledgeJob,
 } from "../../src/knowledge-job-runtime.ts";
 import {
+  inboxCandidateIdentity,
   materializeCandidates,
+  materializeInboxCandidate,
   validateCandidate,
   type Candidate,
 } from "../../src/pi-lifecycle-materializer.ts";
+import {
+  ReviewCandidateViewer,
+  ReviewJobSelector,
+  type ReviewUiAction,
+} from "../../src/knowledge-review-ui.ts";
 import {
   commandBinding,
   failedJobSummaries,
@@ -342,6 +351,88 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     else if (action === "Show status") showStatus(ctx);
   };
 
+  const openReviewUi = async (ctx: ExtensionContext) => {
+    const queue = viewQueueFor(ctx.cwd);
+    if (ctx.mode !== "tui") {
+      const count = queue.reviewJobSummaries().length;
+      ctx.ui.notify(`shared-knowledge: review-ready jobs=${count}; open /knowledge-review in local interactive TUI to inspect candidates`, "info");
+      return;
+    }
+    while (true) {
+      const jobs = queue.reviewJobSummaries();
+      if (jobs.length === 0) {
+        ctx.ui.notify("shared-knowledge: no review-ready jobs in this workspace", "info");
+        return;
+      }
+      const jobId = await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) =>
+        new ReviewJobSelector(jobs, theme, tui, done),
+      );
+      if (!jobId) return;
+      let index = 0;
+      while (true) {
+        const items = queue.pendingReviewItems(jobId);
+        if (items.length === 0) {
+          ctx.ui.notify("shared-knowledge: selected review job has no retained pending candidates", "info");
+          break;
+        }
+        const action = await ctx.ui.custom<ReviewUiAction | null>((tui, theme, _keybindings, done) =>
+          new ReviewCandidateViewer(jobId, items, index, theme, tui, done),
+        );
+        if (!action || action.action === "close") break;
+        index = action.index;
+        if (action.action === "approve") {
+          const confirmed = await ctx.ui.confirm(
+            "Approve candidate to Inbox",
+            "This stages one candidate under knowledge/inbox. It does not run absorption, a model, a command, Git staging/commit, or canonical promotion. Continue?",
+          );
+          if (!confirmed) continue;
+          try {
+            const outcome = await queue.approveReviewItem(
+              jobId,
+              action.itemId,
+              inboxCandidateIdentity,
+              async (candidate) => {
+                const staged = materializeInboxCandidate(candidate, ctx.cwd);
+                return {
+                  outcome: staged.alreadyStaged ? "already-staged" : "staged",
+                  ...(staged.written ? { inboxPath: staged.written } : {}),
+                };
+              },
+            );
+            if (outcome.status === "approved") {
+              ctx.ui.notify(
+                outcome.decision?.outcome === "already-staged"
+                  ? "shared-knowledge: candidate was already staged in Inbox"
+                  : "shared-knowledge: candidate staged in Inbox",
+                "info",
+              );
+            } else if (outcome.status === "already-decided") {
+              ctx.ui.notify("shared-knowledge: candidate is no longer pending", "warning");
+            } else {
+              ctx.ui.notify("shared-knowledge: review candidate is unavailable", "warning");
+            }
+          } catch {
+            ctx.ui.notify("shared-knowledge: review approval could not be completed", "error");
+          }
+        } else if (action.action === "reject") {
+          const confirmed = await ctx.ui.confirm(
+            "Reject candidate",
+            "This records a private rejection decision and does not modify the checkout. Continue?",
+          );
+          if (!confirmed) continue;
+          try {
+            const outcome = await queue.rejectReviewItem(jobId, action.itemId);
+            if (outcome.status === "rejected") ctx.ui.notify("shared-knowledge: candidate rejected", "info");
+            else if (outcome.status === "already-decided") ctx.ui.notify("shared-knowledge: candidate is no longer pending", "warning");
+            else ctx.ui.notify("shared-knowledge: review candidate is unavailable", "warning");
+          } catch {
+            ctx.ui.notify("shared-knowledge: review rejection could not be completed", "error");
+          }
+        }
+      }
+    }
+  };
+
   pi.registerCommand("knowledge-model", {
     description: "Choose the Shared Knowledge background extraction model",
     getArgumentCompletions: (prefix) => {
@@ -397,6 +488,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
         "Reset extraction model scope",
         "Reset materializer scope",
         "Recover failed jobs",
+        "Review ready candidates",
         "Show status",
       ]);
       if (action === "Change extraction model") await configureModelInteractively(ctx);
@@ -404,6 +496,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       else if (action === "Reset extraction model scope") await configureModelInteractively(ctx, true);
       else if (action === "Reset materializer scope") await configureMaterializerInteractively(ctx, true);
       else if (action === "Recover failed jobs") await openJobsUi(ctx);
+      else if (action === "Review ready candidates") await openReviewUi(ctx);
       else if (action === "Show status") showStatus(ctx);
     },
   });
@@ -414,6 +507,10 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
   pi.registerCommand("knowledge-jobs", {
     description: "Inspect and safely retry failed Shared Knowledge jobs",
     handler: async (_args, ctx) => openJobsUi(ctx),
+  });
+  pi.registerCommand("knowledge-review", {
+    description: "Review and approve retained Shared Knowledge candidates locally",
+    handler: async (_args, ctx) => openReviewUi(ctx),
   });
 
   const processOne = async (ctx: ExtensionContext, queue: KnowledgeJobQueue, job: KnowledgeJob) => {
@@ -466,20 +563,23 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     if (job.payload.source) {
       await runSourceAck(ctx.cwd, job.payload.source.instanceId, job.payload.source.runId);
     }
-    const state = result.mode === "review" ? "review-ready" : "done";
+    const state = result.mode === "review" && candidates.length > 0 ? "review-ready" : "done";
     queue.update(job.id, {
       state,
       error: undefined,
       payload: undefined,
-      result: {
-        candidateCount: candidates.length,
-        materializer: result.mode,
-        written: result.written,
-        reviewCandidates: result.mode === "review" ? candidates : undefined,
-      },
+      result: result.mode === "review"
+        ? createReviewResult(candidates)
+        : {
+          candidateCount: candidates.length,
+          materializer: result.mode,
+          written: result.written,
+        },
     });
     const detail = result.mode === "review"
-      ? `${candidates.length} background candidate(s) ready for review; checkout unchanged`
+      ? candidates.length > 0
+        ? `${candidates.length} background candidate(s) ready for review; checkout unchanged`
+        : "no durable background candidates found; review complete"
       : result.mode === "command"
         ? `${candidates.length} background candidate(s) delegated`
         : `${result.written.length} candidate(s) materialized and absorption completed`;
@@ -515,15 +615,8 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     ctx.ui.setStatus("shared-knowledge", `Extracting ${batch.length} knowledge job(s) in background…`);
     void processOne(ctx, queue, job)
       .then(() => {
-        const outcome = queue.read(first.id);
-        for (const item of batch.slice(1)) {
-          queue.update(item.id, {
-            state: outcome?.state ?? "done",
-            error: outcome?.error,
-            payload: undefined,
-            result: outcome?.result,
-          });
-        }
+        const followerPatch = batchFollowerPatch(queue.read(first.id));
+        for (const item of batch.slice(1)) queue.update(item.id, followerPatch);
       })
       .catch((error) => {
         const updated = batch.map((item) => queue.markRetry(item.id, error));

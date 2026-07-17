@@ -66,6 +66,37 @@ function candidateExists(inboxDir: string, id: string): boolean {
   });
 }
 
+/** Canonical Inbox dedup identity used by background and explicit review staging. */
+export function inboxCandidateIdentity(candidate: Candidate): string {
+  const raw = String(candidate.candidate_id ?? "").trim();
+  if (!raw) throw new Error("review candidate has no candidate identity");
+  return slugify(raw);
+}
+
+export type InboxCandidateMaterialization = {
+  candidateIdentity: string;
+  written?: string;
+  alreadyStaged: boolean;
+};
+
+/**
+ * Deterministically stages one validated candidate into Inbox only. It never
+ * invokes the absorber, a command materializer, a model, or Git.
+ */
+export function materializeInboxCandidate(candidate: Candidate, cwd: string): InboxCandidateMaterialization {
+  const errors = validateCandidate(candidate);
+  if (errors.length > 0) throw new Error(`review candidate validation failed: ${errors.join(", ")}`);
+  const candidateIdentity = inboxCandidateIdentity(candidate);
+  const inboxDir = join(cwd, "knowledge", "inbox");
+  mkdirSync(inboxDir, { recursive: true });
+  if (candidateExists(inboxDir, candidateIdentity)) {
+    return { candidateIdentity, alreadyStaged: true };
+  }
+  const relative = join("knowledge", "inbox", `${new Date().toISOString().slice(0, 10)}-${candidateIdentity}.md`);
+  writeFileSync(join(cwd, relative), renderCandidate(candidate), "utf8");
+  return { candidateIdentity, written: relative, alreadyStaged: false };
+}
+
 function runCommand(argv: string[], payload: string, cwd: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(argv[0], argv.slice(1), { cwd, shell: false, stdio: ["pipe", "ignore", "pipe"] });
@@ -91,15 +122,10 @@ export async function materializeCandidates(
     return { mode: "command", written: [] };
   }
 
-  const inboxDir = join(cwd, "knowledge", "inbox");
-  mkdirSync(inboxDir, { recursive: true });
   const written: string[] = [];
   for (const candidate of candidates) {
-    const id = slugify(String(candidate.candidate_id ?? ""));
-    if (candidateExists(inboxDir, id)) continue;
-    const relative = join("knowledge", "inbox", `${new Date().toISOString().slice(0, 10)}-${id}.md`);
-    writeFileSync(join(cwd, relative), renderCandidate(candidate), "utf8");
-    written.push(relative);
+    const outcome = materializeInboxCandidate(candidate, cwd);
+    if (outcome.written) written.push(outcome.written);
   }
   return { mode: "inbox", written };
 }
