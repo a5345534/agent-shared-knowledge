@@ -86,10 +86,12 @@ knowledge-lint --root .
 > repository materialization requires an explicit policy. The `knowledge-absorb`,
 > `knowledge-lint`, and `knowledge-query` commands are available via the package.
 
-### Pi lifecycle materialization policy
+### Legacy environment materialization policy
 
 The default lifecycle mode reports validated candidates but does not write, stage,
-or commit anything under the active checkout. Choose a materializer explicitly:
+or commit anything under the active checkout. These environment variables remain
+compatible as fallback policy when no session/workspace/global Pi materializer
+policy is set. Choose a legacy materializer explicitly:
 
 ```bash
 # Legacy in-checkout inbox writes (explicit opt-in). Post-compact absorption uses
@@ -103,7 +105,9 @@ export SHARED_KNOWLEDGE_MATERIALIZER=command
 export SHARED_KNOWLEDGE_MATERIALIZER_COMMAND='["/absolute/path/materialize", "--json"]'
 ```
 
-Invalid modes or command configuration fail closed without repository writes.
+Invalid modes or command configuration fail closed without repository writes. New
+installs should prefer `/knowledge-materializer` or `/knowledge-config`; Pi never
+persists this command argv.
 For manual pressure-triggered absorption, Git policy is explicit:
 
 ```bash
@@ -344,8 +348,43 @@ are not switched.
 
 Under an environment lock, TUI writes require confirmation and explicit command
 writes require `--allow-inactive`; the saved lower-scope value remains inactive
-until the environment override is removed. These commands do not change
-materializer authority or write tracked project settings.
+until the environment override is removed.
+
+### Interactive materializer and job recovery
+
+Materializer policy can now be configured in Pi using the same `session`,
+`workspace`, and `global` scopes:
+
+```text
+/knowledge-materializer review --scope workspace
+/knowledge-materializer inbox --scope session
+/knowledge-materializer reset --scope workspace
+/knowledge-config                              # guided model/materializer/recovery menu
+/knowledge-jobs                                # failed-job recovery UI
+```
+
+Materializer precedence is `session → workspace → global → legacy environment
+→ review`. This intentionally lets an operator use a scoped `review` policy to
+safely recover from a legacy `SHARED_KNOWLEDGE_MATERIALIZER=command` deployment.
+Resetting the scoped policy restores the legacy environment fallback. Unlike
+model selection, legacy materializer environment configuration is a fallback,
+not a UI lock.
+
+`review` is checkout-safe. Selecting `inbox` requires confirmation because it
+can write `knowledge/inbox` and invoke ordered no-git absorption. Selecting
+`command` also requires confirmation and is available only when the process
+already has a valid `SHARED_KNOWLEDGE_MATERIALIZER_COMMAND` JSON argv binding.
+Pi stores only the mode, never command argv, credentials, headers, candidates,
+or captured content. The command still runs with `shell: false`.
+
+`/knowledge-jobs` lists safe failed-job metadata only: ID, attempts, timestamps,
+model hint, retained-payload availability, and an allowlisted failure category.
+It offers retry-one, count-confirmed retry-all, and “set workspace review mode
+then retry all.” Requeues use the durable queue and wait for normal idle-gated
+background processing; they do not synchronously call a model or materializer.
+Jobs whose retained payload has expired are shown as non-retryable. A command
+materializer receiving zero validated candidates now succeeds as a no-op and is
+not spawned.
 
 ### Background job operations
 
@@ -373,6 +412,8 @@ knowledge-jobs --root . purge --retention-days 7
 | `SHARED_KNOWLEDGE_EXCLUDE_PATTERNS` | `[]` | JSON string array of lines to omit before capture |
 | `SHARED_KNOWLEDGE_JOB_RETENTION_DAYS` | `7` | Terminal private-payload retention |
 | `SHARED_KNOWLEDGE_RUNTIME_DIR` | Git/XDG state | Private runtime base override |
+| `SHARED_KNOWLEDGE_MATERIALIZER` | `review` | Legacy materializer fallback: `review`, `inbox`, or `command` |
+| `SHARED_KNOWLEDGE_MATERIALIZER_COMMAND` | none | Required JSON argv binding when effective mode is `command`; never persisted by Pi |
 
 ### Incremental evidence sources
 
