@@ -43,7 +43,7 @@ test("job selector renders safe metadata without candidate content", () => {
     id: "a".repeat(24),
     state: "review-ready",
     createdAt: "2026-01-01T00:00:00Z",
-    updatedAt: "2026-01-02T00:00:00Z",
+    updatedAt: "2026-01-02T00:00:00Z\x1b[31m",
     candidateCount: 1,
     summary: { pending: 1, approved: 0, rejected: 0 },
     hasReviewContent: true,
@@ -52,6 +52,7 @@ test("job selector renders safe metadata without candidate content", () => {
   const selector = new ReviewJobSelector(jobs, theme, tui, (value) => { selected = value; });
   const rendered = selector.render(100).join("\n");
   assert.equal(rendered.includes("Private candidate"), false);
+  assert.equal(rendered.includes("\x1b"), false);
   selector.handleInput("\r");
   assert.equal(selected, jobs[0].id);
 });

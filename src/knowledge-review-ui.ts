@@ -105,7 +105,8 @@ export class ReviewJobSelector implements Component {
           ? `pending=${job.summary.pending} approved=${job.summary.approved} rejected=${job.summary.rejected}`
           : "review content unavailable";
         const modelHint = job.modelHint ? sanitizeReviewText(job.modelHint, 240) : "unknown";
-        const label = `${prefix}${job.id} · ${availability} · model=${modelHint} · ${job.updatedAt}`;
+        const updatedAt = sanitizeReviewText(job.updatedAt, 80);
+        const label = `${prefix}${job.id} · ${availability} · model=${modelHint} · ${updatedAt}`;
         lines.push(truncateToWidth(index === this.selected ? this.theme.fg("accent", label) : label, safeWidth));
       }
     }

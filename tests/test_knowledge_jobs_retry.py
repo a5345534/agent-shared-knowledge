@@ -98,3 +98,11 @@ def test_status_redacts_review_paths_and_raw_errors_but_show_remains_explicit(tm
     assert "explicit local candidate detail" in shown.stdout
     assert "private-candidate" not in shown.stdout
     assert "private-item" not in shown.stdout
+
+    job["result"]["materializer"] = ["untrusted", "shape"]
+    job["modelHint"] = "safe-model\nprivate-control"
+    path.write_text(json.dumps(job), encoding="utf-8")
+    malformed = run_jobs(tmp_path, "status")
+    assert malformed.returncode == 0
+    assert "untrusted" not in malformed.stdout
+    assert "safe-model\\n" not in malformed.stdout

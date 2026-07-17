@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -51,6 +51,16 @@ test("explicit review staging revalidates and deduplicates Inbox candidates", ()
     () => materializeInboxCandidate({ ...candidate, body: "too short" }, cwd),
     /review candidate validation failed/,
   );
+});
+
+test("review staging fails closed when a nonmatching target file already occupies the deterministic path", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sk-review-collision-"));
+  const inbox = join(cwd, "knowledge", "inbox");
+  mkdirSync(inbox, { recursive: true });
+  const target = join(inbox, `${new Date().toISOString().slice(0, 10)}-safe-candidate.md`);
+  writeFileSync(target, "not the candidate identity");
+  assert.throws(() => materializeInboxCandidate(candidate, cwd), /EEXIST/);
+  assert.equal(readFileSync(target, "utf8"), "not the candidate identity");
 });
 
 test("command mode passes JSON on stdin and does not interpret shell syntax", async () => {

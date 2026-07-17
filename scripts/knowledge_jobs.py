@@ -65,7 +65,7 @@ def safe_model_hint(value: object) -> str | None:
 
 
 def safe_materializer(value: object) -> str | None:
-    return value if value in {"review", "inbox", "command"} else None
+    return value if isinstance(value, str) and value in {"review", "inbox", "command"} else None
 
 
 def safe(job: dict) -> dict:

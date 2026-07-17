@@ -661,8 +661,10 @@ export class KnowledgeJobQueue {
     const nonce = randomUUID();
     for (let attempt = 0; attempt < REVIEW_LOCK_WAIT_ATTEMPTS; attempt += 1) {
       let fd: number | undefined;
+      let created = false;
       try {
         fd = openSync(path, "wx", 0o600);
+        created = true;
         writeFileSync(fd, `${JSON.stringify({ nonce, pid: process.pid, createdAt: new Date().toISOString() })}\n`, "utf8");
         closeSync(fd);
         fd = undefined;
@@ -670,6 +672,9 @@ export class KnowledgeJobQueue {
         return { path, nonce };
       } catch (error) {
         if (fd !== undefined) closeSync(fd);
+        if (created) {
+          try { unlinkSync(path); } catch { /* stale-lock recovery handles a leftover partial file */ }
+        }
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== "EEXIST") throw error;
         if (this.reclaimStaleReviewLock(path)) continue;

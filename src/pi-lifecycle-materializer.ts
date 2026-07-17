@@ -93,7 +93,16 @@ export function materializeInboxCandidate(candidate: Candidate, cwd: string): In
     return { candidateIdentity, alreadyStaged: true };
   }
   const relative = join("knowledge", "inbox", `${new Date().toISOString().slice(0, 10)}-${candidateIdentity}.md`);
-  writeFileSync(join(cwd, relative), renderCandidate(candidate), "utf8");
+  try {
+    // The review queue lock serializes review approvals, while `wx` also
+    // closes the race with independent explicit inbox materialization.
+    writeFileSync(join(cwd, relative), renderCandidate(candidate), { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST" && candidateExists(inboxDir, candidateIdentity)) {
+      return { candidateIdentity, alreadyStaged: true };
+    }
+    throw error;
+  }
   return { candidateIdentity, written: relative, alreadyStaged: false };
 }
 
