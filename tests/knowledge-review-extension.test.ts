@@ -25,7 +25,16 @@ test("knowledge-review is explicit, local, and stages one confirmed candidate wi
 
   const root = mkdtempSync(join(tmpdir(), "knowledge-review-extension-"));
   const previousRuntime = process.env.SHARED_KNOWLEDGE_RUNTIME_DIR;
+  const previousMaterializer = process.env.SHARED_KNOWLEDGE_MATERIALIZER;
+  const previousCommand = process.env.SHARED_KNOWLEDGE_MATERIALIZER_COMMAND;
+  const commandMarker = join(root, "command-materializer-ran");
   process.env.SHARED_KNOWLEDGE_RUNTIME_DIR = join(root, "runtime");
+  process.env.SHARED_KNOWLEDGE_MATERIALIZER = "command";
+  process.env.SHARED_KNOWLEDGE_MATERIALIZER_COMMAND = JSON.stringify([
+    process.execPath,
+    "-e",
+    `require('fs').writeFileSync(${JSON.stringify(commandMarker)}, 'ran')`,
+  ]);
   try {
     const workspace = join(root, "workspace");
     const queue = new KnowledgeJobQueue(workspace);
@@ -73,6 +82,7 @@ test("knowledge-review is explicit, local, and stages one confirmed candidate wi
     const inbox = join(workspace, "knowledge", "inbox");
     assert.equal(readdirSync(inbox).filter((entry) => entry.endsWith(".md")).length, 1);
     assert.equal(existsSync(join(workspace, "knowledge", "facts")), false, "approval must not absorb or promote");
+    assert.equal(existsSync(commandMarker), false, "approval must not spawn the effective command materializer");
     assert.equal(JSON.stringify(notifications).includes(privateBody), false);
     assert.equal(JSON.stringify(notifications).includes("private evidence"), false);
 
@@ -81,5 +91,7 @@ test("knowledge-review is explicit, local, and stages one confirmed candidate wi
     assert.equal(JSON.stringify(notifications).includes(privateBody), false);
   } finally {
     restoreEnv("SHARED_KNOWLEDGE_RUNTIME_DIR", previousRuntime);
+    restoreEnv("SHARED_KNOWLEDGE_MATERIALIZER", previousMaterializer);
+    restoreEnv("SHARED_KNOWLEDGE_MATERIALIZER_COMMAND", previousCommand);
   }
 });
