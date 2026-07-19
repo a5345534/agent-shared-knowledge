@@ -8,6 +8,7 @@ import {
   materializeInboxCandidate,
   materializeCandidates,
   parseMaterializerConfig,
+  validateCandidate,
   type Candidate,
 } from "../src/pi-lifecycle-materializer.ts";
 
@@ -20,6 +21,13 @@ const candidate: Candidate = {
   body: "This candidate body is sufficiently long for validation.",
   reason: "It verifies checkout-safe materialization behavior.",
 };
+
+test("candidate validation fails closed for non-object envelope members", () => {
+  for (const value of [null, undefined, "candidate", 42, true, []]) {
+    assert.deepEqual(validateCandidate(value), ["candidate must be an object"]);
+  }
+  assert.deepEqual(validateCandidate(candidate), []);
+});
 
 test("review-only mode leaves the workspace untouched", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "sk-review-"));

@@ -13,17 +13,21 @@ export function slugify(value: string, fallback = "candidate"): string {
     .replace(/^-+|-+$/g, "").slice(0, 80) || fallback;
 }
 
-export function validateCandidate(candidate: Candidate): string[] {
+export function validateCandidate(candidate: unknown): string[] {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return ["candidate must be an object"];
+  }
+  const value = candidate as Candidate;
   const errors: string[] = [];
   const validTypes = new Set(["architectural-invariant", "reference", "project", "feedback"]);
   const scope = /^(workspace|module:[a-z0-9][a-z0-9-]*|capability:[a-z0-9][a-z0-9-]*)$/;
-  if (!String(candidate.name ?? "").trim()) errors.push("missing name");
-  if (!String(candidate.description ?? "").trim()) errors.push("missing description");
-  if (!validTypes.has(String(candidate.type ?? "").trim())) errors.push("invalid type");
-  if (!scope.test(String(candidate.suggested_scope ?? "").trim())) errors.push("invalid suggested_scope");
-  if (String(candidate.body ?? "").trim().length < 20) errors.push("body too short (<20 chars)");
-  if (!String(candidate.reason ?? "").trim()) errors.push("missing reason");
-  if (!String(candidate.candidate_id ?? "").trim()) errors.push("missing candidate_id");
+  if (!String(value.name ?? "").trim()) errors.push("missing name");
+  if (!String(value.description ?? "").trim()) errors.push("missing description");
+  if (!validTypes.has(String(value.type ?? "").trim())) errors.push("invalid type");
+  if (!scope.test(String(value.suggested_scope ?? "").trim())) errors.push("invalid suggested_scope");
+  if (String(value.body ?? "").trim().length < 20) errors.push("body too short (<20 chars)");
+  if (!String(value.reason ?? "").trim()) errors.push("missing reason");
+  if (!String(value.candidate_id ?? "").trim()) errors.push("missing candidate_id");
   return errors;
 }
 
