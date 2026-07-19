@@ -220,7 +220,7 @@ def close_review(root: Path, job_id: str) -> tuple[int, dict]:
         candidates = result.get("reviewCandidates")
         if isinstance(candidates, list) and candidates:
             return 2, {"error": "review job still has actionable candidates"}
-        legacy_empty = isinstance(candidates, list) and not candidates and result.get("candidateCount") == 0
+        legacy_empty = isinstance(candidates, list) and not candidates and type(result.get("candidateCount")) is int and result.get("candidateCount") == 0
         unavailable = "reviewCandidates" not in result and (bool(job.get("purgedAt")) or isinstance(result.get("reviewSummary"), dict))
         if not legacy_empty and not unavailable:
             return 2, {"error": "review job is not eligible to close"}

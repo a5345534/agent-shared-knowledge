@@ -218,6 +218,11 @@ test("close unavailable refuses actionable, missing, and completed review state"
   const actionable = reviewReady(queue, "actionable", reviewCandidate("actionable"));
   assert.equal((await queue.closeUnavailableReviewJob(actionable.id)).status, "actionable");
   assert.equal(queue.read(actionable.id)?.state, "review-ready");
+  queue.update(actionable.id, {
+    result: { candidateCount: "0" as never, materializer: "review", written: [], reviewCandidates: [] },
+  });
+  assert.equal((await queue.closeUnavailableReviewJob(actionable.id)).status, "unavailable", "malformed candidate counts fail closed");
+  assert.equal(queue.read(actionable.id)?.state, "review-ready");
   assert.equal((await queue.closeUnavailableReviewJob("f".repeat(24))).status, "unavailable");
   queue.update(actionable.id, { state: "done" });
   assert.equal((await queue.closeUnavailableReviewJob(actionable.id)).status, "unavailable");

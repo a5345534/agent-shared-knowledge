@@ -570,7 +570,7 @@ export class KnowledgeJobQueue {
       if (candidates && candidates.length > 0) return { status: "actionable" };
       const legacyEmpty = candidates !== undefined
         && candidates.length === 0
-        && boundedNumber(current.result.candidateCount) === 0;
+        && current.result.candidateCount === 0;
       const unavailable = candidates === undefined
         && (Boolean(current.purgedAt) || isRecord(current.result.reviewSummary));
       if (!legacyEmpty && !unavailable) return { status: "unavailable" };

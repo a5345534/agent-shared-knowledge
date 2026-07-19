@@ -138,6 +138,13 @@ def test_close_review_handles_legacy_empty_and_refuses_actionable_content(tmp_pa
     assert "private actionable candidate" not in refused.stderr
     assert json.loads(path.read_text(encoding="utf-8"))["state"] == "review-ready"
 
+    job["result"]["candidateCount"] = "0"
+    job["result"]["reviewCandidates"] = []
+    path.write_text(json.dumps(job), encoding="utf-8")
+    malformed = run_jobs(tmp_path, "close-review", job_id)
+    assert malformed.returncode == 2
+    assert json.loads(path.read_text(encoding="utf-8"))["state"] == "review-ready"
+
 
 def test_close_review_expires_safe_legacy_summary_and_rejects_ineligible_jobs(tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
