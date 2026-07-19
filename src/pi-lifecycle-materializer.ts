@@ -62,12 +62,13 @@ function renderCandidate(candidate: Candidate): string {
   return `${lines.join("\n")}\n`;
 }
 
-function candidateExists(inboxDir: string, id: string): boolean {
-  if (!existsSync(inboxDir)) return false;
-  return readdirSync(inboxDir).some((file) => {
-    if (!file.endsWith(".md") || file === "README.md") return false;
-    return readFileSync(join(inboxDir, file), "utf8").includes(`candidate_id: ${id}`);
+function candidatePath(inboxDir: string, id: string): string | undefined {
+  if (!existsSync(inboxDir)) return undefined;
+  const file = readdirSync(inboxDir).find((entry) => {
+    if (!entry.endsWith(".md") || entry === "README.md") return false;
+    return readFileSync(join(inboxDir, entry), "utf8").includes(`candidate_id: ${id}`);
   });
+  return file ? join("knowledge", "inbox", file) : undefined;
 }
 
 /** Canonical Inbox dedup identity used by background and explicit review staging. */
@@ -93,8 +94,9 @@ export function materializeInboxCandidate(candidate: Candidate, cwd: string): In
   const candidateIdentity = inboxCandidateIdentity(candidate);
   const inboxDir = join(cwd, "knowledge", "inbox");
   mkdirSync(inboxDir, { recursive: true });
-  if (candidateExists(inboxDir, candidateIdentity)) {
-    return { candidateIdentity, alreadyStaged: true };
+  const existing = candidatePath(inboxDir, candidateIdentity);
+  if (existing) {
+    return { candidateIdentity, written: existing, alreadyStaged: true };
   }
   const relative = join("knowledge", "inbox", `${new Date().toISOString().slice(0, 10)}-${candidateIdentity}.md`);
   try {
@@ -102,8 +104,9 @@ export function materializeInboxCandidate(candidate: Candidate, cwd: string): In
     // closes the race with independent explicit inbox materialization.
     writeFileSync(join(cwd, relative), renderCandidate(candidate), { encoding: "utf8", flag: "wx" });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST" && candidateExists(inboxDir, candidateIdentity)) {
-      return { candidateIdentity, alreadyStaged: true };
+    const raced = candidatePath(inboxDir, candidateIdentity);
+    if ((error as NodeJS.ErrnoException).code === "EEXIST" && raced) {
+      return { candidateIdentity, written: raced, alreadyStaged: true };
     }
     throw error;
   }

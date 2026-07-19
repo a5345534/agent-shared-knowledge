@@ -904,11 +904,11 @@ def insert_under_heading(text: str, heading_prefix: str, heading: str, line: str
         if before_heading:
             before = re.search(rf"^{re.escape(before_heading)}\s*$", text, flags=re.MULTILINE)
             if before:
-                return text[: before.start()].rstrip() + f"\n\n{heading_prefix} {heading}\n\n{line}\n\n" + text[before.start() :]
+                return (text[: before.start()].rstrip() + f"\n\n{heading_prefix} {heading}\n\n{line}\n\n" + text[before.start() :]).rstrip() + "\n"
         return text.rstrip() + f"\n\n{heading_prefix} {heading}\n\n{line}\n"
     next_heading = re.search(rf"^{re.escape(heading_prefix)}\s+", text[marker.end() :], flags=re.MULTILINE)
     insert_at = marker.end() + (next_heading.start() if next_heading else len(text[marker.end() :]))
-    return text[:insert_at].rstrip() + "\n" + line + "\n\n" + text[insert_at:].lstrip("\n")
+    return (text[:insert_at].rstrip() + "\n" + line + "\n\n" + text[insert_at:].lstrip("\n")).rstrip() + "\n"
 
 
 def update_workspace_indexes(root: Path, destination: Path, frontmatter: dict[str, Any]) -> list[str]:

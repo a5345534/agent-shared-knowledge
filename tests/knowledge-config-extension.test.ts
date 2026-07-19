@@ -28,7 +28,7 @@ test("extension configures materializers and recovers jobs without foreground mu
   };
   sharedKnowledgeLifecycle(pi as never);
   assert.deepEqual([...commands.keys()].sort(), [
-    "knowledge-config", "knowledge-jobs", "knowledge-materializer", "knowledge-model", "knowledge-review", "knowledge-status",
+    "knowledge-config", "knowledge-jobs", "knowledge-materializer", "knowledge-model", "knowledge-publisher", "knowledge-review", "knowledge-status",
   ]);
 
   const root = mkdtempSync(join(tmpdir(), "knowledge-config-extension-"));
@@ -38,6 +38,7 @@ test("extension configures materializers and recovers jobs without foreground mu
     "SHARED_KNOWLEDGE_EXTRACTION_MODEL",
     "SHARED_KNOWLEDGE_MATERIALIZER",
     "SHARED_KNOWLEDGE_MATERIALIZER_COMMAND",
+    "SHARED_KNOWLEDGE_PUBLISHER",
     "SHARED_KNOWLEDGE_ASYNC_EXTRACTION",
   ].map((name) => [name, saveEnv(name)]));
   process.env.SHARED_KNOWLEDGE_RUNTIME_DIR = join(root, "runtime");
@@ -45,6 +46,7 @@ test("extension configures materializers and recovers jobs without foreground mu
   delete process.env.SHARED_KNOWLEDGE_EXTRACTION_MODEL;
   process.env.SHARED_KNOWLEDGE_MATERIALIZER = "command";
   process.env.SHARED_KNOWLEDGE_MATERIALIZER_COMMAND = JSON.stringify([process.execPath, "-e", "process.exit(0)"]);
+  delete process.env.SHARED_KNOWLEDGE_PUBLISHER;
   delete process.env.SHARED_KNOWLEDGE_ASYNC_EXTRACTION;
 
   try {
@@ -120,6 +122,13 @@ test("extension configures materializers and recovers jobs without foreground mu
     assert.equal(notifications.at(-1)!.includes("process.exit"), false);
     await commands.get("knowledge-materializer").handler("reset --scope session", ctx);
 
+    await commands.get("knowledge-publisher").handler("pr --scope workspace --acknowledge", ctx);
+    await commands.get("knowledge-status").handler("", ctx);
+    assert.match(notifications.at(-1)!, /Publisher: pr/);
+    assert.match(notifications.at(-1)!, /Publisher source: workspace/);
+    await commands.get("knowledge-publisher").handler("auto-merge --scope global --acknowledge", ctx);
+    assert.match(notifications.at(-1)!, /cannot be configured globally/);
+
     const jobLabel = () => {
       const current = queue.read(failed.id)!;
       return `${current.id} · failed · attempts=${current.attempts} · created=${current.createdAt} · updated=${current.updatedAt} · model=${current.modelHint ?? "unknown"} · materializer command exited (7) · retryable`;
@@ -158,6 +167,10 @@ test("extension configures materializers and recovers jobs without foreground mu
     idle = false;
 
     const nonUi = { ...ctx, hasUI: false, mode: "print" };
+    await commands.get("knowledge-publisher").handler("auto-merge --scope session", nonUi);
+    assert.match(notifications.at(-1)!, /requires --acknowledge/);
+    await commands.get("knowledge-status").handler("", ctx);
+    assert.match(notifications.at(-1)!, /Publisher source: workspace/, "non-TUI publisher authority must remain unchanged without acknowledgement");
     queue.update(failed.id, { state: "failed", attempts: 3, error: secret });
     await commands.get("knowledge-jobs").handler("", nonUi);
     assert.equal(queue.read(failed.id)?.state, "failed", "non-TUI jobs command must not retry");

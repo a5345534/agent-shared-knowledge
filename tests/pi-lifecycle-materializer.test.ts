@@ -54,7 +54,7 @@ test("explicit review staging revalidates and deduplicates Inbox candidates", ()
   assert.match(readFileSync(join(cwd, first.written!), "utf8"), /candidate_id: safe-candidate/);
   const second = materializeInboxCandidate(candidate, cwd);
   assert.equal(second.alreadyStaged, true);
-  assert.equal(second.written, undefined);
+  assert.equal(second.written, first.written);
   assert.throws(
     () => materializeInboxCandidate({ ...candidate, body: "too short" }, cwd),
     /review candidate validation failed/,

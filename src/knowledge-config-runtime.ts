@@ -17,6 +17,7 @@ export const KNOWLEDGE_CONFIG_VERSION = 2;
 export const EXTRACTION_MODEL_ENV = "SHARED_KNOWLEDGE_EXTRACTION_MODEL";
 export const MATERIALIZER_ENV = "SHARED_KNOWLEDGE_MATERIALIZER";
 export const MATERIALIZER_COMMAND_ENV = "SHARED_KNOWLEDGE_MATERIALIZER_COMMAND";
+export const PUBLISHER_ENV = "SHARED_KNOWLEDGE_PUBLISHER";
 
 export type ConfigScope = "session" | "workspace" | "global";
 export type ModelPolicy =
@@ -24,6 +25,8 @@ export type ModelPolicy =
   | { mode: "fixed"; provider: string; modelId: string };
 export type MaterializerMode = "review" | "inbox" | "command";
 export type MaterializerPolicy = { mode: MaterializerMode };
+export type PublisherMode = "off" | "pr" | "auto-merge";
+export type PublisherPolicy = { mode: PublisherMode };
 export type MaterializerConfig =
   | { mode: "review" }
   | { mode: "inbox" }
@@ -32,10 +35,12 @@ export type ConfigDocument = {
   version: typeof KNOWLEDGE_CONFIG_VERSION;
   extractionModel?: ModelPolicy;
   materializer?: MaterializerPolicy;
+  publisher?: PublisherPolicy;
 };
 export type ConfigPatch = {
   extractionModel?: ModelPolicy | null;
   materializer?: MaterializerPolicy | null;
+  publisher?: PublisherPolicy | null;
 };
 export type EffectiveModelPolicy = {
   policy?: ModelPolicy;
@@ -52,15 +57,23 @@ export type EffectiveMaterializerPolicy = {
   diagnostics: string[];
   commandArgv?: string[];
 };
+export type EffectivePublisherPolicy = {
+  policy?: PublisherPolicy;
+  source: "environment" | ConfigScope | "default";
+  locked: boolean;
+  error?: string;
+  diagnostics: string[];
+};
 
 const PROVIDER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const MODEL_RE = /^\S{1,240}$/;
 const ALLOWED_V1_DOCUMENT_KEYS = new Set(["version", "extractionModel"]);
-const ALLOWED_V2_DOCUMENT_KEYS = new Set(["version", "extractionModel", "materializer"]);
+const ALLOWED_V2_DOCUMENT_KEYS = new Set(["version", "extractionModel", "materializer", "publisher"]);
 const ALLOWED_ACTIVE_KEYS = new Set(["mode"]);
 const ALLOWED_FIXED_KEYS = new Set(["mode", "provider", "modelId"]);
 const ALLOWED_MATERIALIZER_KEYS = new Set(["mode"]);
 const MATERIALIZER_MODES = new Set<MaterializerMode>(["review", "inbox", "command"]);
+const PUBLISHER_MODES = new Set<PublisherMode>(["off", "pr", "auto-merge"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -109,6 +122,16 @@ export function formatMaterializerPolicy(policy: MaterializerPolicy): string {
   return policy.mode;
 }
 
+export function parsePublisherPolicy(value: string): PublisherPolicy {
+  const mode = value.trim().toLowerCase() as PublisherMode;
+  if (!PUBLISHER_MODES.has(mode)) throw new Error("publisher must be off, pr, or auto-merge");
+  return { mode };
+}
+
+export function formatPublisherPolicy(policy: PublisherPolicy): string {
+  return policy.mode;
+}
+
 function decodeModelPolicy(value: unknown): ModelPolicy {
   if (!isRecord(value) || typeof value.mode !== "string") throw new Error("missing extraction model policy");
   if (value.mode === "active" && hasOnlyKeys(value, ALLOWED_ACTIVE_KEYS)) return { mode: "active" };
@@ -134,6 +157,13 @@ function decodeMaterializerPolicy(value: unknown): MaterializerPolicy {
   return parseMaterializerPolicy(value.mode);
 }
 
+function decodePublisherPolicy(value: unknown): PublisherPolicy {
+  if (!isRecord(value) || !hasOnlyKeys(value, ALLOWED_MATERIALIZER_KEYS) || typeof value.mode !== "string") {
+    throw new Error("invalid publisher policy");
+  }
+  return parsePublisherPolicy(value.mode);
+}
+
 /** Reads legacy v1 model-only config and canonical v2 partial config. */
 export function decodeConfig(value: unknown): ConfigDocument {
   if (!isRecord(value) || typeof value.version !== "number") throw new Error("unsupported or malformed config document");
@@ -147,7 +177,8 @@ export function decodeConfig(value: unknown): ConfigDocument {
   const document: ConfigDocument = { version: 2 };
   if ("extractionModel" in value) document.extractionModel = decodeModelPolicy(value.extractionModel);
   if ("materializer" in value) document.materializer = decodeMaterializerPolicy(value.materializer);
-  if (!document.extractionModel && !document.materializer) throw new Error("config document has no policy");
+  if ("publisher" in value) document.publisher = decodePublisherPolicy(value.publisher);
+  if (!document.extractionModel && !document.materializer && !document.publisher) throw new Error("config document has no policy");
   return document;
 }
 
@@ -156,6 +187,7 @@ export type ReadConfigResult = {
   /** Backward-compatible extraction model alias. */
   policy?: ModelPolicy;
   materializer?: MaterializerPolicy;
+  publisher?: PublisherPolicy;
   diagnostic?: string;
 };
 
@@ -176,7 +208,7 @@ export function readConfig(path: string): ReadConfigResult {
     if (!info.isFile()) return { diagnostic: `config path is not a regular file: ${path}` };
     if (info.size > 16_384) return { diagnostic: `config file is too large: ${path}` };
     const document = decodeConfig(JSON.parse(readFileSync(path, "utf8")));
-    return { document, policy: document.extractionModel, materializer: document.materializer };
+    return { document, policy: document.extractionModel, materializer: document.materializer, publisher: document.publisher };
   } catch {
     return { diagnostic: `invalid or unreadable config at ${path}` };
   }
@@ -222,7 +254,11 @@ export function updateConfig(path: string, patch: ConfigPatch): ConfigDocument |
     if (patch.materializer) document.materializer = patch.materializer;
     else delete document.materializer;
   }
-  if (!document.extractionModel && !document.materializer) {
+  if ("publisher" in patch) {
+    if (patch.publisher) document.publisher = patch.publisher;
+    else delete document.publisher;
+  }
+  if (!document.extractionModel && !document.materializer && !document.publisher) {
     resetConfig(path);
     return undefined;
   }
@@ -353,6 +389,39 @@ export function resolveEffectiveMaterializer({
   };
 }
 
+export function resolveEffectivePublisher({
+  env = process.env,
+  session,
+  workspace,
+  global,
+}: {
+  env?: NodeJS.ProcessEnv;
+  session?: PublisherPolicy;
+  workspace?: ReadConfigResult;
+  global?: ReadConfigResult;
+}): EffectivePublisherPolicy {
+  const diagnostics = [workspace?.diagnostic, global?.diagnostic].filter((value): value is string => Boolean(value));
+  const raw = env[PUBLISHER_ENV];
+  if (raw !== undefined && raw.trim() !== "") {
+    try {
+      const policy = parsePublisherPolicy(raw);
+      if (policy.mode === "auto-merge") throw new Error("environment auto-merge is forbidden");
+      return { policy, source: "environment", locked: true, diagnostics };
+    } catch {
+      return { source: "environment", locked: true, error: `Invalid ${PUBLISHER_ENV}`, diagnostics };
+    }
+  }
+  if (session) return { policy: session, source: "session", locked: false, diagnostics };
+  if (workspace?.publisher) return { policy: workspace.publisher, source: "workspace", locked: false, diagnostics };
+  if (global?.publisher) {
+    if (global.publisher.mode === "auto-merge") {
+      return { source: "global", locked: false, error: "Global auto-merge publisher policy is forbidden", diagnostics };
+    }
+    return { policy: global.publisher, source: "global", locked: false, diagnostics };
+  }
+  return { policy: { mode: "off" }, source: "default", locked: false, diagnostics };
+}
+
 export function requireMaterializerConfig(effective: EffectiveMaterializerPolicy): MaterializerConfig {
   if (effective.error || !effective.policy) throw new Error(effective.error ?? "No materializer policy available");
   if (effective.policy.mode === "command") {
@@ -407,15 +476,25 @@ export type KnowledgeMaterializerArgs = {
   scope: ConfigScope;
 };
 
-function parseScopeOptions(raw: string): { value?: string; scope: ConfigScope; allowInactive: boolean } {
+export type KnowledgePublisherArgs = {
+  action?: "set" | "reset" | "flush" | "retry";
+  policy?: PublisherPolicy;
+  scope: ConfigScope;
+  acknowledged: boolean;
+};
+
+function parseScopeOptions(raw: string): { value?: string; scope: ConfigScope; allowInactive: boolean; acknowledged: boolean } {
   const tokens = raw.trim() ? raw.trim().split(/\s+/) : [];
   let scope: ConfigScope = "session";
   let allowInactive = false;
+  let acknowledged = false;
   let value: string | undefined;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token === "--allow-inactive") {
       allowInactive = true;
+    } else if (token === "--acknowledge") {
+      acknowledged = true;
     } else if (token === "--scope") {
       const candidate = tokens[++index];
       if (!candidate || !["session", "workspace", "global"].includes(candidate)) throw new Error("--scope requires session, workspace, or global");
@@ -432,11 +511,12 @@ function parseScopeOptions(raw: string): { value?: string; scope: ConfigScope; a
       throw new Error("only one policy value or reset action may be specified");
     }
   }
-  return { value, scope, allowInactive };
+  return { value, scope, allowInactive, acknowledged };
 }
 
 export function parseKnowledgeModelArgs(raw: string): KnowledgeModelArgs {
   const parsed = parseScopeOptions(raw);
+  if (parsed.acknowledged) throw new Error("--acknowledge applies only to publisher configuration");
   if (!parsed.value) return { scope: parsed.scope, allowInactive: parsed.allowInactive };
   if (parsed.value === "reset") return { action: "reset", scope: parsed.scope, allowInactive: parsed.allowInactive };
   return { action: "set", policy: parseModelReference(parsed.value), scope: parsed.scope, allowInactive: parsed.allowInactive };
@@ -444,10 +524,23 @@ export function parseKnowledgeModelArgs(raw: string): KnowledgeModelArgs {
 
 export function parseKnowledgeMaterializerArgs(raw: string): KnowledgeMaterializerArgs {
   const parsed = parseScopeOptions(raw);
-  if (parsed.allowInactive) throw new Error("--allow-inactive applies only to extraction model configuration");
+  if (parsed.allowInactive || parsed.acknowledged) throw new Error("unsupported materializer option");
   if (!parsed.value) return { scope: parsed.scope };
   if (parsed.value === "reset") return { action: "reset", scope: parsed.scope };
   return { action: "set", policy: parseMaterializerPolicy(parsed.value), scope: parsed.scope };
+}
+
+export function parseKnowledgePublisherArgs(raw: string): KnowledgePublisherArgs {
+  const parsed = parseScopeOptions(raw);
+  if (parsed.allowInactive) throw new Error("--allow-inactive applies only to extraction model configuration");
+  if (!parsed.value) return { scope: parsed.scope, acknowledged: parsed.acknowledged };
+  if (parsed.value === "reset") return { action: "reset", scope: parsed.scope, acknowledged: parsed.acknowledged };
+  if (parsed.value === "flush" || parsed.value === "retry") {
+    return { action: parsed.value, scope: parsed.scope, acknowledged: parsed.acknowledged };
+  }
+  const policy = parsePublisherPolicy(parsed.value);
+  if (policy.mode === "auto-merge" && parsed.scope === "global") throw new Error("auto-merge cannot be configured globally");
+  return { action: "set", policy, scope: parsed.scope, acknowledged: parsed.acknowledged };
 }
 
 export type QueueCounts = Record<"pending" | "running" | "retry-wait" | "failed" | "review-ready", number>;
