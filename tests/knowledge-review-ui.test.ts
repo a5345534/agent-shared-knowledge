@@ -45,7 +45,7 @@ test("job selector renders safe metadata without candidate content", () => {
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-02T00:00:00Z\x1b[31m",
     candidateCount: 1,
-    summary: { pending: 1, approved: 0, rejected: 0 },
+    summary: { pending: 1, approved: 0, rejected: 0, expired: 0 },
     hasReviewContent: true,
   }];
   let selected: string | null | undefined;

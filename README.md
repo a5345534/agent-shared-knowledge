@@ -423,12 +423,19 @@ knowledge-absorb --root . plan
 knowledge-absorb --root . apply --safe-only
 ```
 
-`R` records a private rejection without changing the checkout; `S` leaves the
-candidate pending. Content is deliberately rendered only in the explicitly
-opened local TUI. `/knowledge-status`, `/knowledge-jobs`, CLI `status`, RPC,
-print, and JSON modes remain redacted; use an interactive local Pi terminal to
-review. Candidate and decision detail follows the normal terminal retention
-window and becomes unavailable after purge.
+`R` is a semantic discard of exactly one candidate: it records a private
+rejection without immediately deleting retained detail or changing the checkout;
+`S` leaves the candidate pending. When a selected legacy-empty or already-purged
+review job has no actionable content, the local TUI offers a separate confirmed
+close. Closing preserves the job and idempotency record, changes private queue
+state only, and never invokes a model, materializer, absorber, command, or Git.
+
+Content is deliberately rendered only in the explicitly opened local TUI.
+`/knowledge-status`, `/knowledge-jobs`, CLI `status`, RPC, print, and JSON modes
+remain redacted; use an interactive local Pi terminal to review. Candidate and
+decision detail follows the normal terminal retention window. Expiry atomically
+moves unresolved pending counts to the safe `expired` aggregate, marks the job
+done, and purges private detail so dead `review-ready` rows do not remain.
 
 ### Background job operations
 
@@ -440,6 +447,7 @@ authorization headers are never persisted.
 knowledge-jobs --root . status
 knowledge-jobs --root . show <job-id>   # explicit review-candidate detail
 knowledge-jobs --root . retry <job-id>  # failed job only; requires retained payload
+knowledge-jobs --root . close-review <job-id>  # exact legacy-empty/unavailable review job
 knowledge-jobs --root . purge --retention-days 7 --dry-run
 knowledge-jobs --root . purge --retention-days 7
 ```

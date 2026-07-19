@@ -58,7 +58,8 @@
           "properties": {
             "pending": { "type": "integer", "minimum": 0 },
             "approved": { "type": "integer", "minimum": 0 },
-            "rejected": { "type": "integer", "minimum": 0 }
+            "rejected": { "type": "integer", "minimum": 0 },
+            "expired": { "type": "integer", "minimum": 0 }
           },
           "additionalProperties": false
         }

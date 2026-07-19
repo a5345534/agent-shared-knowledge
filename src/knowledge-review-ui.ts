@@ -102,12 +102,13 @@ export class ReviewJobSelector implements Component {
       for (const [index, job] of this.jobs.entries()) {
         const prefix = index === this.selected ? "> " : "  ";
         const availability = job.hasReviewContent
-          ? `pending=${job.summary.pending} approved=${job.summary.approved} rejected=${job.summary.rejected}`
+          ? `pending=${job.summary.pending} approved=${job.summary.approved} rejected=${job.summary.rejected} expired=${job.summary.expired}`
           : "review content unavailable";
         const modelHint = job.modelHint ? sanitizeReviewText(job.modelHint, 240) : "unknown";
         const updatedAt = sanitizeReviewText(job.updatedAt, 80);
         const label = `${prefix}${job.id} · ${availability} · model=${modelHint} · ${updatedAt}`;
-        lines.push(truncateToWidth(index === this.selected ? this.theme.fg("accent", label) : label, safeWidth));
+        const truncated = sanitizeReviewText(truncateToWidth(label, safeWidth), safeWidth * 4);
+        lines.push(index === this.selected ? this.theme.fg("accent", truncated) : truncated);
       }
     }
     lines.push("", truncateToWidth(this.theme.fg("dim", "↑↓ select · Enter open · Esc close"), safeWidth));

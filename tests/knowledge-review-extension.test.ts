@@ -95,3 +95,63 @@ test("knowledge-review is explicit, local, and stages one confirmed candidate wi
     restoreEnv("SHARED_KNOWLEDGE_MATERIALIZER_COMMAND", previousCommand);
   }
 });
+
+test("knowledge-review confirms unavailable close, honors decline, and reports stale state without content", async () => {
+  const commands = new Map<string, any>();
+  const pi = {
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    on() {},
+  };
+  sharedKnowledgeLifecycle(pi as never);
+  const root = mkdtempSync(join(tmpdir(), "knowledge-review-close-extension-"));
+  const previousRuntime = process.env.SHARED_KNOWLEDGE_RUNTIME_DIR;
+  process.env.SHARED_KNOWLEDGE_RUNTIME_DIR = join(root, "runtime");
+  try {
+    const workspace = join(root, "workspace");
+    const queue = new KnowledgeJobQueue(workspace);
+    const { job } = queue.enqueue(createCapturedPayload(workspace, "empty", "private empty source must stay hidden ".repeat(30)));
+    queue.update(job.id, {
+      state: "review-ready",
+      payload: undefined,
+      result: { candidateCount: 0, materializer: "review", written: [], reviewCandidates: [], reviewSummary: { pending: 0, approved: 0, rejected: 0, expired: 0 } },
+    });
+    const notifications: string[] = [];
+    let confirmed = false;
+    const ctx: any = {
+      cwd: workspace,
+      mode: "tui",
+      hasUI: true,
+      ui: {
+        notify: (message: string) => notifications.push(message),
+        confirm: async () => confirmed,
+        custom: async (factory: any) => new Promise((resolve) => {
+          const component = factory({ requestRender() {} }, { fg: (_: string, text: string) => text, bold: (text: string) => text }, {}, resolve);
+          component.handleInput("\r");
+        }),
+      },
+    };
+
+    await commands.get("knowledge-review").handler("", ctx);
+    assert.equal(queue.read(job.id)?.state, "review-ready", "declining must not mutate private state");
+    confirmed = true;
+    await commands.get("knowledge-review").handler("", ctx);
+    assert.equal(queue.read(job.id)?.state, "done");
+    assert.ok(notifications.some((message) => message.includes("empty review job closed")));
+    assert.equal(JSON.stringify(notifications).includes("private empty source"), false);
+
+    const { job: stale } = queue.enqueue(createCapturedPayload(workspace, "stale", "private stale source must stay hidden ".repeat(30)));
+    queue.update(stale.id, {
+      state: "review-ready",
+      payload: undefined,
+      result: { candidateCount: 0, materializer: "review", written: [], reviewCandidates: [], reviewSummary: { pending: 0, approved: 0, rejected: 0, expired: 0 } },
+    });
+    ctx.ui.confirm = async () => {
+      queue.update(stale.id, { state: "done" });
+      return true;
+    };
+    await commands.get("knowledge-review").handler("", ctx);
+    assert.ok(notifications.some((message) => message.includes("no longer eligible")));
+  } finally {
+    restoreEnv("SHARED_KNOWLEDGE_RUNTIME_DIR", previousRuntime);
+  }
+});

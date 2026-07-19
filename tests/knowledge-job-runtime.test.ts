@@ -72,12 +72,12 @@ test("failed jobs with retained payload can be explicitly retried", () => {
   assert.throws(() => queue.retryFailed(job.id), /is not failed/);
 });
 
-test("failed jobs without retained payload cannot be retried", () => {
+test("failed jobs without retained payload cannot be retried", async () => {
   const { root, env } = fixture();
   const queue = new KnowledgeJobQueue(root, { maxPayloadBytes: 2048, retentionDays: 0, maxAttempts: 1, debounceMs: 0, maxBatchJobs: 4 }, env);
   const { job } = queue.enqueue(createCapturedPayload(root, "s", "must preserve this durable decision ".repeat(20), queue.config));
   queue.markRetry(job.id, "invalid candidate JSON");
-  queue.cleanup({ now: Date.now() + 1000 });
+  await queue.cleanup({ now: Date.now() + 1000 });
 
   assert.throws(() => queue.retryFailed(job.id), /no retained payload/);
 });
@@ -105,13 +105,13 @@ test("eligibility rejects noise and accepts durable conversation", () => {
   assert.equal(isMeaningfulConversation("user: We decided this architecture must never write canonical facts directly. ".repeat(4)), true);
 });
 
-test("cleanup supports dry run and removal", () => {
+test("cleanup supports dry run and removal", async () => {
   const { root, env } = fixture();
   const queue = new KnowledgeJobQueue(root, { maxPayloadBytes: 2048, retentionDays: 0, maxAttempts: 2, debounceMs: 0, maxBatchJobs: 4 }, env);
   const { job } = queue.enqueue(createCapturedPayload(root, "s", "must preserve this durable decision ".repeat(20), queue.config));
   queue.update(job.id, { state: "done" });
-  assert.deepEqual(queue.cleanup({ dryRun: true, now: Date.now() + 1000 }), [job.id]);
-  assert.deepEqual(queue.cleanup({ now: Date.now() + 1000 }), [job.id]);
+  assert.deepEqual(await queue.cleanup({ dryRun: true, now: Date.now() + 1000 }), [job.id]);
+  assert.deepEqual(await queue.cleanup({ now: Date.now() + 1000 }), [job.id]);
   assert.equal(queue.read(job.id)?.payload, undefined);
   assert.ok(queue.read(job.id)?.purgedAt);
   assert.equal(queue.enqueue(createCapturedPayload(root, "s", "must preserve this durable decision ".repeat(20), queue.config)).created, false);
@@ -149,7 +149,7 @@ test("review decisions preserve legacy candidates, complete jobs, and redact sta
   assert.equal(approved.status, "approved");
   assert.equal(queue.read(job.id)?.state, "done");
   queue.update(job.id, { error: "private runtime error detail", modelHint: "safe-model\nprivate-control" });
-  assert.deepEqual(queue.status()[0]?.result?.reviewSummary, { pending: 0, approved: 1, rejected: 0 });
+  assert.deepEqual(queue.status()[0]?.result?.reviewSummary, { pending: 0, approved: 1, rejected: 0, expired: 0 });
   const publicStatus = JSON.stringify(queue.status());
   assert.equal(publicStatus.includes("private runtime error detail"), false);
   assert.equal(publicStatus.includes("safe-model\\n"), false);
@@ -168,11 +168,83 @@ test("review rejection remains private and terminal detail is purged", async () 
   const rejected = await queue.rejectReviewItem(job.id, item.id);
   assert.equal(rejected.status, "rejected");
   assert.equal(queue.read(job.id)?.state, "done");
-  assert.deepEqual(queue.cleanup({ now: Date.now() + 1000 }), [job.id]);
+  assert.deepEqual(await queue.cleanup({ now: Date.now() + 1000 }), [job.id]);
   const purged = queue.read(job.id)!;
   assert.equal(purged.result?.reviewCandidates, undefined);
   assert.equal(purged.result?.reviewDecisions, undefined);
-  assert.deepEqual(purged.result?.reviewSummary, { pending: 0, approved: 0, rejected: 1 });
+  assert.deepEqual(purged.result?.reviewSummary, { pending: 0, approved: 0, rejected: 1, expired: 0 });
+});
+
+test("legacy empty and purged unavailable review jobs close with normalized summaries", async () => {
+  const { root, env } = fixture();
+  const queue = new KnowledgeJobQueue(root, { maxPayloadBytes: 2048, retentionDays: 7, maxAttempts: 2, debounceMs: 0, maxBatchJobs: 4 }, env);
+  const { job: empty } = queue.enqueue(createCapturedPayload(root, "empty", "must preserve durable empty review state ".repeat(20), queue.config));
+  queue.update(empty.id, {
+    state: "review-ready",
+    payload: undefined,
+    nextAttemptAt: "2026-01-01T00:00:00Z",
+    error: "legacy",
+    result: { candidateCount: 0, materializer: "review", written: [], reviewCandidates: [] },
+  });
+  const emptyClosed = await queue.closeUnavailableReviewJob(empty.id);
+  assert.equal(emptyClosed.status, "closed");
+  assert.equal(emptyClosed.outcome, "empty");
+  assert.deepEqual(emptyClosed.summary, { pending: 0, approved: 0, rejected: 0, expired: 0 });
+  assert.equal(queue.read(empty.id)?.state, "done");
+  assert.equal(queue.read(empty.id)?.nextAttemptAt, undefined);
+  assert.equal(queue.read(empty.id)?.error, undefined);
+
+  const { job: expired } = queue.enqueue(createCapturedPayload(root, "expired", "must preserve durable expired review state ".repeat(20), queue.config));
+  queue.update(expired.id, {
+    state: "review-ready",
+    payload: undefined,
+    purgedAt: "2026-01-01T00:00:00Z",
+    result: {
+      candidateCount: 3,
+      materializer: "review",
+      written: [],
+      reviewSummary: { pending: 2, approved: 1, rejected: 0 } as never,
+    },
+  });
+  const expiredClosed = await queue.closeUnavailableReviewJob(expired.id);
+  assert.equal(expiredClosed.status, "closed");
+  assert.equal(expiredClosed.outcome, "expired");
+  assert.deepEqual(expiredClosed.summary, { pending: 0, approved: 1, rejected: 0, expired: 2 });
+});
+
+test("close unavailable refuses actionable, missing, and completed review state", async () => {
+  const { root, env } = fixture();
+  const queue = new KnowledgeJobQueue(root, { maxPayloadBytes: 2048, retentionDays: 7, maxAttempts: 2, debounceMs: 0, maxBatchJobs: 4 }, env);
+  const actionable = reviewReady(queue, "actionable", reviewCandidate("actionable"));
+  assert.equal((await queue.closeUnavailableReviewJob(actionable.id)).status, "actionable");
+  assert.equal(queue.read(actionable.id)?.state, "review-ready");
+  queue.update(actionable.id, {
+    result: { candidateCount: "0" as never, materializer: "review", written: [], reviewCandidates: [] },
+  });
+  assert.equal((await queue.closeUnavailableReviewJob(actionable.id)).status, "unavailable", "malformed candidate counts fail closed");
+  assert.equal(queue.read(actionable.id)?.state, "review-ready");
+  assert.equal((await queue.closeUnavailableReviewJob("f".repeat(24))).status, "unavailable");
+  queue.update(actionable.id, { state: "done" });
+  assert.equal((await queue.closeUnavailableReviewJob(actionable.id)).status, "unavailable");
+});
+
+test("cleanup expires pending review detail and removes unavailable selector rows", async () => {
+  const { root, env } = fixture();
+  const queue = new KnowledgeJobQueue(root, { maxPayloadBytes: 2048, retentionDays: 0, maxAttempts: 2, debounceMs: 0, maxBatchJobs: 4 }, env);
+  const first = reviewCandidate("expire-one");
+  const second = reviewCandidate("expire-two");
+  const { job } = queue.enqueue(createCapturedPayload(root, "expiry", "must preserve durable review expiry ".repeat(20), queue.config));
+  queue.update(job.id, { state: "review-ready", payload: undefined, result: createReviewResult([first, second]) });
+  const [item] = queue.pendingReviewItems(job.id);
+  assert.ok(item);
+  assert.equal((await queue.rejectReviewItem(job.id, item.id)).status, "rejected");
+  assert.deepEqual(await queue.cleanup({ now: Date.now() + 1000 }), [job.id]);
+  const expired = queue.read(job.id)!;
+  assert.equal(expired.state, "done");
+  assert.equal(expired.result?.reviewCandidates, undefined);
+  assert.equal(expired.result?.reviewDecisions, undefined);
+  assert.deepEqual(expired.result?.reviewSummary, { pending: 0, approved: 0, rejected: 1, expired: 1 });
+  assert.deepEqual(queue.reviewJobSummaries(), []);
 });
 
 test("batched review followers complete without duplicated review candidates", () => {

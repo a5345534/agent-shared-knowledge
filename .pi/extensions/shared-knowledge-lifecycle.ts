@@ -372,7 +372,33 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       while (true) {
         const items = queue.pendingReviewItems(jobId);
         if (items.length === 0) {
-          ctx.ui.notify("shared-knowledge: selected review job has no retained pending candidates", "info");
+          const selected = jobs.find((job) => job.id === jobId);
+          if (!selected?.hasReviewContent) {
+            const confirmed = await ctx.ui.confirm(
+              "Close unavailable review job",
+              "This closes private empty or expired review state only. It does not delete a job record, write checkout content, run a model/materializer/absorber/command, or use Git. Continue?",
+            );
+            if (!confirmed) return;
+            try {
+              const outcome = await queue.closeUnavailableReviewJob(jobId);
+              if (outcome.status === "closed") {
+                ctx.ui.notify(
+                  outcome.outcome === "empty"
+                    ? "shared-knowledge: empty review job closed"
+                    : "shared-knowledge: unavailable review job closed as expired",
+                  "info",
+                );
+              } else if (outcome.status === "actionable") {
+                ctx.ui.notify("shared-knowledge: review job now has actionable pending candidates", "warning");
+              } else {
+                ctx.ui.notify("shared-knowledge: review job is no longer eligible to close", "warning");
+              }
+            } catch {
+              ctx.ui.notify("shared-knowledge: unavailable review job could not be closed", "error");
+            }
+          } else {
+            ctx.ui.notify("shared-knowledge: selected review job has no pending candidates", "info");
+          }
           break;
         }
         const action = await ctx.ui.custom<ReviewUiAction | null>((tui, theme, _keybindings, done) =>
