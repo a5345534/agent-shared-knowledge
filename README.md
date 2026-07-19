@@ -311,12 +311,19 @@ extract → validate → materialize → optional no-git absorb
 
 Candidate extraction no longer adds an awaited LLM call to compaction. Background
 failure is fail-open for the session and fail-closed for canonical mutation. The
-response parser accepts a direct JSON envelope, a fenced envelope, or one balanced
-JSON envelope surrounded by prose, while candidate validation remains strict.
-Parse diagnostics contain only bounded structural metadata, never response text;
-later attempts add a JSON-only correction instruction. The safe default `review`
-mode leaves the checkout unchanged; explicit `inbox` and argv-based `command`
-materializers retain their existing authority boundaries.
+response parser accepts the required candidate-submission tool envelope as a
+normalized object or bounded strict JSON string. It retains direct, fenced, and
+balanced text-envelope fallback for provider compatibility, while deterministic
+candidate validation remains strict. Tool-only failures are classified separately
+from malformed text, so normalized empty arguments no longer appear as `bytes=0`
+text JSON failures. Diagnostics contain only allowlisted bounded shape metadata,
+never response text, tool names/arguments, or candidate content; later attempts
+receive tool- or text-specific correction instructions. Pi's OpenAI-compatible
+adapter may normalize both empty and malformed streamed arguments to `{}`, so the
+package reports only that observable shape rather than claiming access to discarded
+raw fragments. The safe default `review` mode leaves the checkout unchanged;
+explicit `inbox` and argv-based `command` materializers retain their existing
+authority boundaries.
 
 ### Interactive background model configuration
 
@@ -382,9 +389,12 @@ model hint, retained-payload availability, and an allowlisted failure category.
 It offers retry-one, count-confirmed retry-all, and “set workspace review mode
 then retry all.” Requeues use the durable queue and wait for normal idle-gated
 background processing; they do not synchronously call a model or materializer.
-Jobs whose retained payload has expired are shown as non-retryable. A command
-materializer receiving zero validated candidates now succeeds as a no-op and is
-not spawned.
+Jobs whose retained payload has expired are shown as non-retryable. For retained
+historical structured-submission failures, first set the workspace to safe `review`
+mode (or select “Set workspace review mode and retry all”), then retry so the next
+idle-gated attempt uses the updated tool-aware parser and guidance. Retry does not
+silently switch models or run materialization synchronously. A command materializer
+receiving zero validated candidates now succeeds as a no-op and is not spawned.
 
 ### Interactive review-ready approval
 
