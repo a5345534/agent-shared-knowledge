@@ -331,11 +331,11 @@ export class KnowledgePublisherRuntime {
     const manualOpen = mode === "pr" ? jobs.find((candidate) => ["pr-open", "waiting"].includes(candidate.state) && candidate.prNumber && candidate.attempts < 20) : undefined;
     if (manualOpen) return this.refreshManualPr(manualOpen);
     if (mode === "pr" && jobs.some((candidate) => ["pr-open", "waiting"].includes(candidate.state) && candidate.prNumber)) return undefined;
-    const job = jobs.find((candidate) => ["pending", "preparing", "validated", "pushed"].includes(candidate.state))
+    let job = jobs.find((candidate) => ["pending", "preparing", "validated", "pushed"].includes(candidate.state))
       ?? (mode === "auto-merge" ? jobs.find((candidate) => ["pr-open", "waiting"].includes(candidate.state) && candidate.prNumber && candidate.attempts < 20) : undefined);
     if (!job) return undefined;
     if (mode === "off") return this.queue.update(job.id, { state: "waiting", diagnostic: "policy-off" });
-    if (job.mode !== mode) job.mode = mode;
+    if (job.mode !== mode) job = this.queue.update(job.id, { mode: mode as Exclude<PublisherMode, "off"> });
     if (job.state === "pushed") return this.recoverPushed(job);
     if (job.state === "validated") return this.recoverValidated(job);
     if (job.state === "preparing") job.state = "pending";
@@ -383,6 +383,7 @@ export class KnowledgePublisherRuntime {
       job = this.queue.update(job.id, { worktreePath: worktree });
       this.command(["git", "worktree", "add", "--detach", worktree, baseSha], this.queue.cwd, "transport-failed", 120_000);
 
+      this.requirePolicy(job.mode);
       for (const input of job.inputs) {
         const source = join(this.queue.cwd, input.path);
         const info = lstatSync(source);
@@ -400,6 +401,7 @@ export class KnowledgePublisherRuntime {
       if (!actions.length || actions.some((action: any) => !action.safeToApply)) throw new Error("absorption-blocked");
       const planPath = join(worktree, ".git-shared-knowledge-publish-plan.json");
       writeFileSync(planPath, `${JSON.stringify({ ...plan, actions })}\n`, { mode: 0o600 });
+      this.requirePolicy(job.mode);
       const applyRaw = this.command(["python3", this.options.absorberScript, "--root", worktree, "apply", "--plan-file", planPath, "--safe-only", "--format", "json"], worktree, "absorption-blocked", 120_000);
       rmSync(planPath, { force: true });
       const apply = parseJson(applyRaw);
@@ -413,6 +415,7 @@ export class KnowledgePublisherRuntime {
       if (!changed.length) {
         const allResolved = actions.every((action: any) => ["retain_memory", "merge_into_existing"].includes(action.action));
         if (!allResolved) throw new Error("absorption-blocked");
+        this.requirePolicy(job.mode);
         this.cleanupInputs(job);
         return this.queue.update(job.id, { state: "already-canonical", base, baseSha, remote: this.remote, localValidated: true });
       }
@@ -556,6 +559,7 @@ export class KnowledgePublisherRuntime {
       return this.queue.update(job.id, { state: "merged", attempts: job.attempts + 1, diagnostic: "none" });
     }
     if (pr.state === "CLOSED") return this.queue.update(job.id, { state: "blocked", attempts: job.attempts + 1, diagnostic: "closed-unmerged" });
+    if (pr.state !== "OPEN") return this.queue.update(job.id, { state: "waiting", attempts: job.attempts + 1, diagnostic: "transport-failed" });
     this.cleanupInputs(job);
     return this.queue.update(job.id, { state: "pr-open", attempts: job.attempts + 1, diagnostic: "none" });
   }

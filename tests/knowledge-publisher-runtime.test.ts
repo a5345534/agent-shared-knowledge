@@ -135,6 +135,27 @@ test("hash race preserves local input after PR durability", async () => {
   assert.equal(readFileSync(join(root, path), "utf8"), "operator changed content");
 });
 
+test("policy disablement before safe apply stops absorption and preserves input", async () => {
+  const { root, runtime, path } = fixture();
+  const queue = new KnowledgePublisherQueue(root, { SHARED_KNOWLEDGE_RUNTIME_DIR: runtime });
+  queue.reconcile([reviewJob(path)], "pr");
+  const fake = pipelineRunner(root);
+  let active = true;
+  const runner = (argv: string[], cwd: string) => {
+    const result = fake.runner(argv, cwd);
+    if (argv.includes("plan") && argv.includes("--format")) active = false;
+    return result;
+  };
+  const job = await new KnowledgePublisherRuntime(queue, {
+    absorberScript: "/pkg/absorb.py", lintScript: "/pkg/lint.py", runner,
+    policyActive: () => active,
+  }).processNext("pr");
+  assert.equal(job?.state, "preparing");
+  assert.equal(job?.diagnostic, "policy-off");
+  assert.equal(fake.calls.some((argv) => argv.includes("apply")), false);
+  assert.equal(existsSync(join(root, path)), true);
+});
+
 test("policy disablement before push preserves validated recovery state", async () => {
   const { root, runtime, path } = fixture();
   const queue = new KnowledgePublisherQueue(root, { SHARED_KNOWLEDGE_RUNTIME_DIR: runtime });
