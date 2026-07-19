@@ -137,7 +137,7 @@ function exactSha(value: string): string {
 function checkCategory(error: unknown): PublishDiagnostic {
   const message = String(error);
   for (const value of [
-    "remote-unsupported", "auth-unavailable", "input-stale", "absorption-blocked",
+    "policy-off", "remote-unsupported", "auth-unavailable", "input-stale", "absorption-blocked",
     "ignored-output", "validation-failed", "ref-race", "checks-pending", "checks-failed",
     "merge-conflict", "review-required", "stale-head", "closed-unmerged",
   ] as PublishDiagnostic[]) if (message.includes(value)) return value;
@@ -278,6 +278,7 @@ export type PublisherRuntimeOptions = {
   absorberScript: string;
   lintScript: string;
   runner?: CommandRunner;
+  policyActive?: (mode: Exclude<PublisherMode, "off">) => boolean;
 };
 
 export class KnowledgePublisherRuntime {
@@ -347,6 +348,10 @@ export class KnowledgePublisherRuntime {
       }
     }
     return this.process(job);
+  }
+
+  private requirePolicy(mode: Exclude<PublisherMode, "off">): void {
+    if (this.options.policyActive && !this.options.policyActive(mode)) throw new Error("policy-off");
   }
 
   private command(argv: string[], cwd: string, category: PublishDiagnostic, timeout = 60_000): string {
@@ -428,7 +433,10 @@ export class KnowledgePublisherRuntime {
       if (remoteLookup.status !== 0) throw new Error("transport-failed");
       const remoteHead = remoteLookup.stdout.trim();
       if (remoteHead && !remoteHead.startsWith(`${commitSha}\t`)) throw new Error("ref-race");
-      if (!remoteHead) this.command(["git", "push", this.remote, `HEAD:refs/heads/${branch}`], worktree, "transport-failed", 120_000);
+      if (!remoteHead) {
+        this.requirePolicy(job.mode);
+        this.command(["git", "push", this.remote, `HEAD:refs/heads/${branch}`], worktree, "transport-failed", 120_000);
+      }
       job = this.queue.update(job.id, { state: "pushed" });
 
       const existingRaw = this.command(["gh", "pr", "list", "--head", branch, "--state", "all", "--json", "number,url,state,headRefOid,baseRefName"], worktree, "transport-failed", 30_000);
@@ -443,6 +451,7 @@ export class KnowledgePublisherRuntime {
         pr = verified;
       }
       if (!pr) {
+        this.requirePolicy(job.mode);
         const rawUrl = this.command(["gh", "pr", "create", "--base", base, "--head", branch, "--title", "docs: publish reviewed shared knowledge", "--body", `Automated canonical publication of explicitly reviewed Shared Knowledge.\n\n<!-- shared-knowledge-publisher:v1 job=${job.id} sha=${commitSha} -->`], worktree, "transport-failed", 60_000);
         const url = safePrUrl(rawUrl);
         const numberMatch = url ? /\/(\d+)$/.exec(url) : undefined;
@@ -452,12 +461,15 @@ export class KnowledgePublisherRuntime {
       const prUrl = safePrUrl(pr.url);
       if (!Number.isSafeInteger(Number(pr.number)) || Number(pr.number) < 1 || !prUrl) throw new Error("transport-failed");
       job = this.queue.update(job.id, { state: "pr-open", prNumber: Number(pr.number), prUrl });
+      this.requirePolicy(job.mode);
       this.cleanupInputs(job);
       if (job.mode === "pr") return job;
       return this.attemptMerge(job, worktree);
     } catch (error) {
       const diagnostic = checkCategory(error);
-      const state: PublishState = ["checks-pending", "review-required"].includes(diagnostic) ? "waiting" : "blocked";
+      const state: PublishState = diagnostic === "policy-off"
+        ? job.state
+        : ["checks-pending", "review-required"].includes(diagnostic) ? "waiting" : "blocked";
       return this.queue.update(job.id, { state, diagnostic });
     } finally {
       if (worktree) {
@@ -487,11 +499,13 @@ export class KnowledgePublisherRuntime {
       const remoteHead = lookup.stdout.trim();
       if (remoteHead && !remoteHead.startsWith(`${job.commitSha}\t`)) throw new Error("ref-race");
       if (!remoteHead) {
+        this.requirePolicy(job.mode);
         this.command(["git", "push", job.remote ?? this.remote, `${job.commitSha}:refs/heads/${job.branch}`], this.queue.cwd, "transport-failed", 120_000);
       }
       return this.recoverPushed(this.queue.update(job.id, { state: "pushed", attempts: job.attempts + 1 }));
     } catch (error) {
-      return this.queue.update(job.id, { state: "blocked", diagnostic: checkCategory(error), attempts: job.attempts + 1 });
+      const diagnostic = checkCategory(error);
+      return this.queue.update(job.id, { state: diagnostic === "policy-off" ? "validated" : "blocked", diagnostic, attempts: job.attempts + 1 });
     }
   }
 
@@ -505,6 +519,7 @@ export class KnowledgePublisherRuntime {
       let pr = Array.isArray(listed) ? listed.find((value: any) => value.state === "OPEN" && value.headRefOid === job.commitSha && value.baseRefName === job.base) : undefined;
       const marker = `<!-- shared-knowledge-publisher:v1 job=${job.id} sha=${job.commitSha} -->`;
       if (!pr) {
+        this.requirePolicy(job.mode);
         const rawUrl = this.command(["gh", "pr", "create", "--base", job.base, "--head", job.branch, "--title", "docs: publish reviewed shared knowledge", "--body", `Automated canonical publication of explicitly reviewed Shared Knowledge.\n\n${marker}`], this.queue.cwd, "transport-failed", 60_000);
         const url = safePrUrl(rawUrl);
         const match = url ? /\/(\d+)$/.exec(url) : undefined;
@@ -518,33 +533,44 @@ export class KnowledgePublisherRuntime {
       const prUrl = safePrUrl(pr.url);
       if (!Number.isSafeInteger(Number(pr.number)) || Number(pr.number) < 1 || !prUrl) throw new Error("transport-failed");
       const ready = this.queue.update(job.id, { state: "pr-open", prNumber: Number(pr.number), prUrl, attempts: job.attempts + 1 });
+      this.requirePolicy(ready.mode);
       this.cleanupInputs(ready);
       return ready.mode === "auto-merge" ? this.attemptMerge(ready, this.queue.cwd) : ready;
     } catch (error) {
-      return this.queue.update(job.id, { state: "blocked", diagnostic: checkCategory(error), attempts: job.attempts + 1 });
+      const diagnostic = checkCategory(error);
+      return this.queue.update(job.id, { state: diagnostic === "policy-off" ? "pushed" : "blocked", diagnostic, attempts: job.attempts + 1 });
     }
   }
 
   private refreshManualPr(job: PublishJob): PublishJob {
+    this.requirePolicy("pr");
     const result = this.run(["gh", "pr", "view", String(job.prNumber), "--json", "state,headRefOid,baseRefName,url,body"], this.queue.cwd, 30_000);
     if (result.status !== 0) return this.queue.update(job.id, { attempts: job.attempts + 1, diagnostic: "transport-failed" });
     const pr = parseJson(result.stdout);
-    if (pr?.state === "MERGED") return this.queue.update(job.id, { state: "merged", attempts: job.attempts + 1, diagnostic: "none" });
-    if (pr?.state === "CLOSED") return this.queue.update(job.id, { state: "blocked", attempts: job.attempts + 1, diagnostic: "closed-unmerged" });
     const marker = `<!-- shared-knowledge-publisher:v1 job=${job.id} sha=${job.commitSha} -->`;
     if (pr?.headRefOid !== job.commitSha || pr?.baseRefName !== job.base || !String(pr?.body ?? "").includes(marker)) {
       return this.queue.update(job.id, { state: "blocked", attempts: job.attempts + 1, diagnostic: "stale-head" });
     }
+    if (pr.state === "MERGED") {
+      this.cleanupInputs(job);
+      return this.queue.update(job.id, { state: "merged", attempts: job.attempts + 1, diagnostic: "none" });
+    }
+    if (pr.state === "CLOSED") return this.queue.update(job.id, { state: "blocked", attempts: job.attempts + 1, diagnostic: "closed-unmerged" });
+    this.cleanupInputs(job);
     return this.queue.update(job.id, { state: "pr-open", attempts: job.attempts + 1, diagnostic: "none" });
   }
 
   private attemptMerge(job: PublishJob, cwd: string): PublishJob {
+    this.requirePolicy("auto-merge");
     if (!job.prNumber || !job.commitSha || !job.base || !job.localValidated) throw new Error("stale-head");
     const raw = this.command(["gh", "pr", "view", String(job.prNumber), "--json", "state,mergeable,headRefOid,baseRefName,statusCheckRollup,url,body"], cwd, "transport-failed", 30_000);
     const pr = parseJson(raw);
-    if (!pr || pr.state !== "OPEN") throw new Error("closed-unmerged");
+    if (!pr) throw new Error("closed-unmerged");
     const marker = `<!-- shared-knowledge-publisher:v1 job=${job.id} sha=${job.commitSha} -->`;
     if (pr.headRefOid !== job.commitSha || pr.baseRefName !== job.base || !String(pr.body ?? "").includes(marker)) throw new Error("stale-head");
+    if (pr.state === "MERGED") return this.queue.update(job.id, { state: "merged", diagnostic: "none" });
+    if (pr.state !== "OPEN") throw new Error("closed-unmerged");
+    this.cleanupInputs(job);
     if (pr.mergeable === "CONFLICTING") throw new Error("merge-conflict");
     if (pr.mergeable !== "MERGEABLE") throw new Error("checks-pending");
     const checks = Array.isArray(pr.statusCheckRollup) ? pr.statusCheckRollup : [];

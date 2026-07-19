@@ -39,6 +39,7 @@ function reviewJob(path: string): any {
 function pipelineRunner(root: string, options: {
   checks?: any[]; mutateBeforeCleanup?: boolean; remoteUrl?: string; mergeable?: string;
   headSha?: string; mergeStatus?: number; ignored?: boolean; remoteHead?: string;
+  prState?: string; body?: string;
 } = {}) {
   const calls: string[][] = [];
   let prBody = "";
@@ -66,7 +67,7 @@ function pipelineRunner(root: string, options: {
       if (options.mutateBeforeCleanup) writeFileSync(join(root, "knowledge", "inbox", "approved.md"), "operator changed content");
       return ok("https://github.com/owner/repo/pull/7\n");
     }
-    if (command.startsWith("gh pr view")) return ok(JSON.stringify({ state: "OPEN", mergeable: options.mergeable ?? "MERGEABLE", headRefOid: options.headSha ?? "c".repeat(40), baseRefName: "main", statusCheckRollup: options.checks ?? [], url: "https://github.com/owner/repo/pull/7", body: prBody }));
+    if (command.startsWith("gh pr view")) return ok(JSON.stringify({ state: options.prState ?? "OPEN", mergeable: options.mergeable ?? "MERGEABLE", headRefOid: options.headSha ?? "c".repeat(40), baseRefName: "main", statusCheckRollup: options.checks ?? [], url: "https://github.com/owner/repo/pull/7", body: options.body ?? prBody }));
     if (command.startsWith("gh pr merge") && options.mergeStatus) return fail();
     return ok();
   };
@@ -134,6 +135,27 @@ test("hash race preserves local input after PR durability", async () => {
   assert.equal(readFileSync(join(root, path), "utf8"), "operator changed content");
 });
 
+test("policy disablement before push preserves validated recovery state", async () => {
+  const { root, runtime, path } = fixture();
+  const queue = new KnowledgePublisherQueue(root, { SHARED_KNOWLEDGE_RUNTIME_DIR: runtime });
+  queue.reconcile([reviewJob(path)], "pr");
+  const fake = pipelineRunner(root);
+  let active = true;
+  const runner = (argv: string[], cwd: string) => {
+    const result = fake.runner(argv, cwd);
+    if (argv[0] === "git" && argv[1] === "diff" && argv.includes("--cached")) active = false;
+    return result;
+  };
+  const job = await new KnowledgePublisherRuntime(queue, {
+    absorberScript: "/pkg/absorb.py", lintScript: "/pkg/lint.py", runner,
+    policyActive: () => active,
+  }).processNext("pr");
+  assert.equal(job?.state, "validated");
+  assert.equal(job?.diagnostic, "policy-off");
+  assert.equal(fake.calls.some((argv) => argv[0] === "git" && argv[1] === "push"), false);
+  assert.equal(existsSync(join(root, path)), true);
+});
+
 test("auto-merge accepts empty checks and uses normal squash without admin", async () => {
   const { root, runtime, path } = fixture();
   const queue = new KnowledgePublisherQueue(root, { SHARED_KNOWLEDGE_RUNTIME_DIR: runtime });
@@ -193,6 +215,19 @@ test("isolated publisher runs real safe-only absorption without touching unrelat
   assert.equal(existsSync(join(root, staged.written!)), false);
   assert.equal(spawnSync("git", ["status", "--porcelain", "--", "unrelated.txt"], { cwd: root, encoding: "utf8" }).stdout.trim(), "?? unrelated.txt");
   assert.ok(calls.some((argv) => argv[0] === "git" && argv[1] === "worktree" && argv[2] === "add"));
+});
+
+test("auto-merge recovers merge success recorded remotely before local state", async () => {
+  const { root, runtime, path } = fixture();
+  const queue = new KnowledgePublisherQueue(root, { SHARED_KNOWLEDGE_RUNTIME_DIR: runtime });
+  const pending = queue.reconcile([reviewJob(path)], "auto-merge")[0]!;
+  const commit = "c".repeat(40);
+  const marker = `<!-- shared-knowledge-publisher:v1 job=${pending.id} sha=${commit} -->`;
+  queue.update(pending.id, { state: "waiting", remote: "origin", base: "main", baseSha: "b".repeat(40), branch: `shared-knowledge/publish-${pending.id}`, commitSha: commit, localValidated: true, prNumber: 7, prUrl: "https://github.com/owner/repo/pull/7" });
+  const fake = pipelineRunner(root, { prState: "MERGED", body: marker });
+  const job = await new KnowledgePublisherRuntime(queue, { absorberScript: "/pkg/absorb.py", lintScript: "/pkg/lint.py", runner: fake.runner }).processNext("auto-merge");
+  assert.equal(job?.state, "merged");
+  assert.equal(fake.calls.some((argv) => argv[2] === "merge"), false);
 });
 
 test("auto-merge gate matrix fails closed without admin", async () => {

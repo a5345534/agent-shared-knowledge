@@ -757,7 +757,14 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     if (!publishable) return false;
     publisherRunning.add(cwd);
     ctx.ui.setStatus("shared-knowledge-publisher", "Publishing reviewed knowledge…");
-    const runtime = new KnowledgePublisherRuntime(queue, { absorberScript: ABSORBER_SCRIPT, lintScript: LINT_SCRIPT });
+    const runtime = new KnowledgePublisherRuntime(queue, {
+      absorberScript: ABSORBER_SCRIPT,
+      lintScript: LINT_SCRIPT,
+      policyActive: (expected) => {
+        const current = effectivePublisherFor(ctx);
+        return !current.error && current.policy?.mode === expected;
+      },
+    });
     void runtime.processNext(effective.policy.mode)
       .then((job) => {
         if (!job) return;
