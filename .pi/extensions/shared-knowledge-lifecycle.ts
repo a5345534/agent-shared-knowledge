@@ -548,6 +548,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
 
     const parsed = parseCandidateAssistantResponse<Candidate>(response.content, response.stopReason);
     const candidates = parsed.candidates
+      .filter((candidate) => validateCandidate(candidate).length === 0)
       .map((candidate) => job.payload?.source ? {
         ...candidate,
         capture_source: `source:${job.payload.source.instanceId}`,
@@ -556,8 +557,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
         evidence_snapshot: job.payload.source.snapshot,
         source_revision: job.payload.source.revision,
         evidence_paths: job.payload.source.evidencePaths ?? [],
-      } : candidate)
-      .filter((candidate) => validateCandidate(candidate).length === 0);
+      } : candidate);
     const result = await materializeCandidates(materializer, candidates, ctx.cwd);
     if (result.mode === "inbox" && result.written.length > 0) await runAbsorber(ctx.cwd);
     if (job.payload.source) {
