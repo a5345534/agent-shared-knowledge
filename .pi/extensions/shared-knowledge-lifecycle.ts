@@ -33,17 +33,20 @@ import {
   failedJobSummaries,
   formatMaterializerPolicy,
   formatModelPolicy,
+  formatPublisherPolicy,
   formatSafeJobDiagnostic,
   globalConfigPath,
   materializerArgumentCompletions,
   modelArgumentCompletions,
   parseKnowledgeMaterializerArgs,
   parseKnowledgeModelArgs,
+  parseKnowledgePublisherArgs,
   readConfig,
   requireMaterializerConfig,
   requireModelAuthentication,
   resolveEffectiveMaterializer,
   resolveEffectiveModel,
+  resolveEffectivePublisher,
   selectExtractionModel,
   summarizeQueue,
   updateConfig,
@@ -51,7 +54,9 @@ import {
   type ConfigScope,
   type MaterializerPolicy,
   type ModelPolicy,
+  type PublisherPolicy,
 } from "../../src/knowledge-config-runtime.ts";
+import { KnowledgePublisherQueue, KnowledgePublisherRuntime } from "../../src/knowledge-publisher-runtime.ts";
 import {
   CANDIDATE_SUBMISSION_TOOL_NAME,
   extractionFailureNotice,
@@ -63,6 +68,7 @@ const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PROMPT_FILE = join(PACKAGE_ROOT, ".pi", "prompts", "compact-review.md");
 const ABSORBER_SCRIPT = join(PACKAGE_ROOT, "scripts", "knowledge_absorb.py");
 const SOURCES_SCRIPT = join(PACKAGE_ROOT, "scripts", "knowledge_sources.py");
+const LINT_SCRIPT = join(PACKAGE_ROOT, "scripts", "knowledge_lint.py");
 const running = new Set<string>();
 const timers = new Map<string, NodeJS.Timeout>();
 const busy = new Set<string>();
@@ -120,6 +126,9 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
   const queues = new Map<string, KnowledgeJobQueue>();
   const sessionModelPolicies = new Map<object | string, ModelPolicy>();
   const sessionMaterializerPolicies = new Map<object | string, MaterializerPolicy>();
+  const sessionPublisherPolicies = new Map<object | string, PublisherPolicy>();
+  const publisherQueues = new Map<string, KnowledgePublisherQueue>();
+  const publisherRunning = new Set<string>();
   let availableModels: Array<{ provider: string; id: string }> = [];
 
   const queueFor = (cwd: string, recoverInterrupted = true) => {
@@ -170,6 +179,22 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       global: config.global,
     });
   };
+  const effectivePublisherFor = (ctx: ExtensionContext) => {
+    const config = persistentConfigFor(ctx);
+    return resolveEffectivePublisher({
+      session: sessionPolicyFor(sessionPublisherPolicies, ctx),
+      workspace: config.workspace,
+      global: config.global,
+    });
+  };
+  const publisherQueueFor = (cwd: string) => {
+    let queue = publisherQueues.get(cwd);
+    if (!queue) {
+      queue = new KnowledgePublisherQueue(cwd);
+      publisherQueues.set(cwd, queue);
+    }
+    return queue;
+  };
   const refreshAvailableModels = (ctx: ExtensionContext) => {
     availableModels = ctx.modelRegistry.getAvailable().map((model) => ({ provider: model.provider, id: model.id }));
     return availableModels;
@@ -184,6 +209,11 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
   const updateMaterializerScope = (ctx: ExtensionContext, scope: ConfigScope, policy?: MaterializerPolicy) => {
     if (scope === "session") return updateSessionPolicy(sessionMaterializerPolicies, ctx, policy);
     updateConfig(scopedPath(ctx, scope), { materializer: policy ?? null });
+  };
+  const updatePublisherScope = (ctx: ExtensionContext, scope: ConfigScope, policy?: PublisherPolicy) => {
+    if (policy?.mode === "auto-merge" && scope === "global") throw new Error("auto-merge cannot be configured globally");
+    if (scope === "session") return updateSessionPolicy(sessionPublisherPolicies, ctx, policy);
+    updateConfig(scopedPath(ctx, scope), { publisher: policy ?? null });
   };
   const permitInactiveModelWrite = async (ctx: ExtensionContext, allowInactive: boolean, interactive: boolean) => {
     const effective = effectiveModelFor(ctx);
@@ -200,13 +230,20 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
   const statusText = (ctx: ExtensionContext) => {
     const model = effectiveModelFor(ctx);
     const materializer = effectiveMaterializerFor(ctx);
+    const publisher = effectivePublisherFor(ctx);
     const queue = viewQueueFor(ctx.cwd);
+    const publishJobs = publisherQueueFor(ctx.cwd).summaries();
     const counts = summarizeQueue(queue.list());
     const configuredModel = model.policy ? formatModelPolicy(model.policy) : "invalid environment value";
     const activeDetail = model.policy?.mode === "active"
       ? ` → ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "no active model"}`
       : "";
     const configuredMaterializer = materializer.policy ? formatMaterializerPolicy(materializer.policy) : "invalid";
+    const configuredPublisher = publisher.policy ? formatPublisherPolicy(publisher.policy) : "invalid";
+    const publishCounts = publishJobs.reduce<Record<string, number>>((counts, job) => {
+      counts[job.state] = (counts[job.state] ?? 0) + 1;
+      return counts;
+    }, {});
     return [
       `Extraction model: ${configuredModel}${activeDetail}`,
       `Source: ${model.source}${model.locked ? " (locked by environment)" : ""}`,
@@ -215,10 +252,15 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       `Materializer source: ${materializer.source}`,
       materializer.policy?.mode === "command" ? `Command binding: ${materializer.commandBindingAvailable ? "available" : "unavailable"}` : undefined,
       materializer.error ? "Materializer configuration error" : undefined,
+      `Publisher: ${configuredPublisher}`,
+      `Publisher source: ${publisher.source}${publisher.locked ? " (locked by environment)" : ""}`,
+      publisher.error ? "Publisher configuration error" : undefined,
+      `Publisher jobs: ${Object.entries(publishCounts).map(([state, count]) => `${state}=${count}`).join(" ") || "none"}`,
       `Runtime: ${queue.root}`,
       `Jobs: pending=${counts.pending} running=${counts.running} retry-wait=${counts["retry-wait"]} failed=${counts.failed} review-ready=${counts["review-ready"]}`,
       ...model.diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),
       ...materializer.diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),
+      ...publisher.diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),
     ].filter((line): line is string => Boolean(line)).join("\n");
   };
   const showStatus = (ctx: ExtensionContext) => ctx.ui.notify(statusText(ctx), "info");
@@ -272,6 +314,40 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     }
     updateMaterializerScope(ctx, scope, policy);
     ctx.ui.notify(`Shared Knowledge ${reset ? "materializer reset" : "materializer saved"} for ${scope}.\n${statusText(ctx)}`, "info");
+  };
+
+  const confirmPublisherAuthority = async (ctx: ExtensionContext, policy: PublisherPolicy) => {
+    if (policy.mode === "off") return true;
+    if (!ctx.hasUI) throw new Error(`${policy.mode} publisher requires --acknowledge outside dialog-capable UI`);
+    const detail = policy.mode === "auto-merge"
+      ? "Approved candidates may be canonically absorbed in isolation, pushed to a PR, and squash merged when checks pass or are absent. Branch protection and required reviews are not bypassed. Continue?"
+      : "Approved candidates may be canonically absorbed in isolation, pushed, and opened as pull requests. Continue?";
+    return ctx.ui.confirm(`Confirm ${policy.mode} publisher`, detail);
+  };
+  const reconcilePublisher = (ctx: ExtensionContext) => {
+    const effective = effectivePublisherFor(ctx);
+    if (effective.error || !effective.policy || effective.policy.mode === "off") return [];
+    return publisherQueueFor(ctx.cwd).reconcile(viewQueueFor(ctx.cwd).list(), effective.policy.mode);
+  };
+  const configurePublisherInteractively = async (ctx: ExtensionContext, reset = false) => {
+    if (!ctx.hasUI) {
+      ctx.ui.notify("Use /knowledge-publisher <off|pr|auto-merge|reset> --scope <scope> --acknowledge outside TUI mode.", "warning");
+      return;
+    }
+    const scope = await chooseScope(ctx);
+    if (!scope) return;
+    let policy: PublisherPolicy | undefined;
+    if (!reset) {
+      const choices = scope === "global" ? ["off", "pr"] : ["off", "pr", "auto-merge"];
+      const selected = await ctx.ui.select("Reviewed knowledge publisher", choices);
+      if (!selected) return;
+      policy = parseKnowledgePublisherArgs(`${selected} --scope ${scope}`).policy;
+      if (policy && !await confirmPublisherAuthority(ctx, policy)) return;
+    }
+    updatePublisherScope(ctx, scope, policy);
+    const reconciled = reconcilePublisher(ctx);
+    if (reconciled.length) schedule(ctx, 0);
+    ctx.ui.notify(`Shared Knowledge ${reset ? "publisher reset" : "publisher saved"} for ${scope}.\n${statusText(ctx)}`, "info");
   };
 
   const requeueIds = (ctx: ExtensionContext, ids: string[]) => {
@@ -432,6 +508,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
                   : "shared-knowledge: candidate staged in Inbox",
                 "info",
               );
+              if (outcome.job?.state === "done" && reconcilePublisher(ctx).length > 0) schedule(ctx, 0);
             } else if (outcome.status === "already-decided") {
               ctx.ui.notify("shared-knowledge: candidate is no longer pending", "warning");
             } else {
@@ -504,6 +581,49 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       }
     },
   });
+  pi.registerCommand("knowledge-publisher", {
+    description: "Configure or flush reviewed Shared Knowledge PR publication",
+    getArgumentCompletions: (prefix) => {
+      const values = ["off", "pr", "auto-merge", "reset", "flush", "retry", "--scope session", "--scope workspace", "--scope global", "--acknowledge"]
+        .filter((value) => value.startsWith(prefix.trim()));
+      return values.length ? values.map((value) => ({ value, label: value })) : null;
+    },
+    handler: async (args, ctx) => {
+      try {
+        const parsed = parseKnowledgePublisherArgs(args);
+        if (!parsed.action) return configurePublisherInteractively(ctx);
+        if (parsed.action === "flush") {
+          const jobs = reconcilePublisher(ctx);
+          if (jobs.length) schedule(ctx, 0);
+          ctx.ui.notify(`shared-knowledge publisher: reconciled ${jobs.length} reviewed publication job(s)`, "info");
+          return;
+        }
+        if (parsed.action === "retry") {
+          const queue = publisherQueueFor(ctx.cwd);
+          let count = 0;
+          for (const job of queue.list()) {
+            if (["blocked", "failed", "waiting"].includes(job.state)) {
+              try { queue.retry(job.id); count += 1; } catch { /* stale */ }
+            }
+          }
+          if (count) schedule(ctx, 0);
+          ctx.ui.notify(`shared-knowledge publisher: requeued ${count} job(s)`, "info");
+          return;
+        }
+        if (parsed.policy && parsed.policy.mode !== "off" && !parsed.acknowledged) {
+          if (!ctx.hasUI || !await confirmPublisherAuthority(ctx, parsed.policy)) {
+            throw new Error("publisher authority requires --acknowledge or dialog confirmation");
+          }
+        }
+        updatePublisherScope(ctx, parsed.scope, parsed.policy);
+        const jobs = reconcilePublisher(ctx);
+        if (jobs.length) schedule(ctx, 0);
+        ctx.ui.notify(`Shared Knowledge ${parsed.action === "reset" ? "publisher reset" : "publisher saved"} for ${parsed.scope}.\n${statusText(ctx)}`, "info");
+      } catch (error) {
+        ctx.ui.notify(`shared-knowledge config: ${String(error).slice(0, 300)}`, "error");
+      }
+    },
+  });
   pi.registerCommand("knowledge-config", {
     description: "Open Shared Knowledge configuration and recovery",
     handler: async (_args, ctx) => {
@@ -511,16 +631,26 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       const action = await ctx.ui.select("Shared Knowledge configuration", [
         "Change extraction model",
         "Change materializer",
+        "Change publisher",
         "Reset extraction model scope",
         "Reset materializer scope",
+        "Reset publisher scope",
+        "Flush reviewed publication",
         "Recover failed jobs",
         "Review ready candidates",
         "Show status",
       ]);
       if (action === "Change extraction model") await configureModelInteractively(ctx);
       else if (action === "Change materializer") await configureMaterializerInteractively(ctx);
+      else if (action === "Change publisher") await configurePublisherInteractively(ctx);
       else if (action === "Reset extraction model scope") await configureModelInteractively(ctx, true);
       else if (action === "Reset materializer scope") await configureMaterializerInteractively(ctx, true);
+      else if (action === "Reset publisher scope") await configurePublisherInteractively(ctx, true);
+      else if (action === "Flush reviewed publication") {
+        const jobs = reconcilePublisher(ctx);
+        if (jobs.length) schedule(ctx, 0);
+        ctx.ui.notify(`shared-knowledge publisher: reconciled ${jobs.length} reviewed publication job(s)`, "info");
+      }
       else if (action === "Recover failed jobs") await openJobsUi(ctx);
       else if (action === "Review ready candidates") await openReviewUi(ctx);
       else if (action === "Show status") showStatus(ctx);
@@ -613,10 +743,48 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     ctx.ui.notify(`shared-knowledge: ${detail}`, "info");
   };
 
-  const drain = (ctx: ExtensionContext) => {
-    if (process.env.SHARED_KNOWLEDGE_ASYNC_EXTRACTION === "0" || !ctx.isIdle()) return;
+  const drainPublisher = (ctx: ExtensionContext): boolean => {
     const cwd = ctx.cwd;
-    if (busy.has(cwd) || running.has(cwd)) return;
+    if (!ctx.isIdle() || busy.has(cwd) || running.has(cwd) || publisherRunning.has(cwd)) return false;
+    const effective = effectivePublisherFor(ctx);
+    if (effective.error || !effective.policy || effective.policy.mode === "off") return false;
+    const queue = publisherQueueFor(cwd);
+    const publishJobs = queue.list();
+    const manualPrOpen = effective.policy?.mode === "pr" && publishJobs.some((job) => ["pr-open", "waiting"].includes(job.state) && Boolean(job.prNumber));
+    const refreshableManualPr = effective.policy?.mode === "pr" && publishJobs.some((job) => ["pr-open", "waiting"].includes(job.state) && Boolean(job.prNumber) && job.attempts < 20);
+    const publishable = refreshableManualPr || (!manualPrOpen && publishJobs.some((job) => ["pending", "preparing", "validated", "pushed"].includes(job.state)
+      || (effective.policy?.mode === "auto-merge" && ["pr-open", "waiting"].includes(job.state) && Boolean(job.prNumber) && job.attempts < 20)));
+    if (!publishable) return false;
+    publisherRunning.add(cwd);
+    ctx.ui.setStatus("shared-knowledge-publisher", "Publishing reviewed knowledge…");
+    const runtime = new KnowledgePublisherRuntime(queue, { absorberScript: ABSORBER_SCRIPT, lintScript: LINT_SCRIPT });
+    void runtime.processNext(effective.policy.mode)
+      .then((job) => {
+        if (!job) return;
+        const detail = job.state === "merged"
+          ? "reviewed knowledge PR squash merged"
+          : job.state === "pr-open"
+            ? `reviewed knowledge PR opened${job.prUrl ? `: ${job.prUrl}` : ""}`
+            : job.state === "already-canonical"
+              ? "reviewed knowledge was already canonical"
+              : `publisher state=${job.state} diagnostic=${job.diagnostic ?? "none"}`;
+        ctx.ui.notify(`shared-knowledge: ${detail}`, ["blocked", "failed"].includes(job.state) ? "warning" : "info");
+      })
+      .catch(() => ctx.ui.notify("shared-knowledge: publisher failed with bounded diagnostic", "error"))
+      .finally(() => {
+        publisherRunning.delete(cwd);
+        ctx.ui.setStatus("shared-knowledge-publisher", undefined);
+        if (ctx.isIdle()) schedule(ctx);
+      });
+    return true;
+  };
+
+  const drain = (ctx: ExtensionContext) => {
+    if (!ctx.isIdle()) return;
+    const cwd = ctx.cwd;
+    if (busy.has(cwd) || running.has(cwd) || publisherRunning.has(cwd)) return;
+    if (drainPublisher(ctx)) return;
+    if (process.env.SHARED_KNOWLEDGE_ASYNC_EXTRACTION === "0") return;
     const queue = queueFor(cwd);
     const batch = queue.nextReadyBatch();
     const first = batch[0];
@@ -693,7 +861,10 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     }
   });
 
-  pi.on("session_start", (_event, ctx) => { refreshAvailableModels(ctx); });
+  pi.on("session_start", (_event, ctx) => {
+    refreshAvailableModels(ctx);
+    if (reconcilePublisher(ctx).length > 0) schedule(ctx, 0);
+  });
   pi.on("session_compact", (_event, ctx) => schedule(ctx));
   pi.on("agent_start", (_event, ctx) => {
     busy.add(ctx.cwd);
@@ -711,5 +882,6 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     timers.delete(ctx.cwd);
     updateSessionPolicy(sessionModelPolicies, ctx);
     updateSessionPolicy(sessionMaterializerPolicies, ctx);
+    updateSessionPolicy(sessionPublisherPolicies, ctx);
   });
 }

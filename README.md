@@ -437,6 +437,39 @@ decision detail follows the normal terminal retention window. Expiry atomically
 moves unresolved pending counts to the safe `expired` aggregate, marks the job
 done, and purges private detail so dead `review-ready` rows do not remain.
 
+### Reviewed knowledge PR publishing
+
+Reviewed Inbox candidates can be published without committing unrelated worktree
+dirt. Publishing is opt-in and disabled by default:
+
+```text
+/knowledge-publisher off --scope workspace
+/knowledge-publisher pr --scope workspace --acknowledge
+/knowledge-publisher auto-merge --scope workspace --acknowledge
+/knowledge-publisher flush
+/knowledge-publisher retry
+```
+
+`pr` copies only exact approved Inbox files into a private temporary worktree at
+the current remote base, runs filtered safe-only absorption, `knowledge-lint`, and
+diff checks, then pushes a package-owned branch and opens a canonical-facts-only
+GitHub PR. The active branch, HEAD, index, unrelated dirt, and canonical checkout
+files are not modified. Once the branch and PR are verified durable, only
+unchanged hash-matching local Inbox files are removed.
+
+`auto-merge` performs the same publication and uses a normal squash merge only
+when the recorded PR head remains exact and every reported GitHub check succeeds.
+An empty check set is accepted after local validation. Pending or unsuccessful
+checks, conflicts, required reviews, and branch protection block merge; the
+publisher never uses `--admin`, self-approval, force push, or direct base-branch
+push. It also does not pull/synchronize the active checkout after merge.
+
+Persistent `auto-merge` is workspace-only; session use is also supported. Global
+or `SHARED_KNOWLEDGE_PUBLISHER=auto-merge` configuration fails closed. Ambient
+`git`/`gh` authentication is used without persistence. If canonical output such
+as `knowledge/facts/` is ignored by `.gitignore` or `.git/info/exclude`, publishing
+fails with `ignored-output`; remove that policy explicitly rather than force-add.
+
 ### Background job operations
 
 Runtime payloads are stored outside tracked checkout content (prefer Git-private
@@ -466,6 +499,7 @@ knowledge-jobs --root . purge --retention-days 7
 | `SHARED_KNOWLEDGE_RUNTIME_DIR` | Git/XDG state | Private runtime base override |
 | `SHARED_KNOWLEDGE_MATERIALIZER` | `review` | Legacy materializer fallback: `review`, `inbox`, or `command` |
 | `SHARED_KNOWLEDGE_MATERIALIZER_COMMAND` | none | Required JSON argv binding when effective mode is `command`; never persisted by Pi |
+| `SHARED_KNOWLEDGE_PUBLISHER` | `off` | Read-only deployment fallback: `off` or `pr`; environment `auto-merge` is forbidden |
 
 ### Incremental evidence sources
 

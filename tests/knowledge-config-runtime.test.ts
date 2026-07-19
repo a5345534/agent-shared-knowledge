@@ -15,6 +15,7 @@ import {
   modelArgumentCompletions,
   parseKnowledgeMaterializerArgs,
   parseKnowledgeModelArgs,
+  parseKnowledgePublisherArgs,
   parseMaterializerPolicy,
   parseModelReference,
   readConfig,
@@ -22,6 +23,7 @@ import {
   requireModelAuthentication,
   resolveEffectiveMaterializer,
   resolveEffectiveModel,
+  resolveEffectivePublisher,
   safeJobDiagnostic,
   selectExtractionModel,
   summarizeQueue,
@@ -34,6 +36,20 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), "knowledge-config-"));
   return { root, workspace: join(root, "workspace"), runtime: join(root, "runtime"), agent: join(root, "agent") };
 }
+
+test("publisher policy is scoped, backward compatible, and fail-closed", () => {
+  assert.deepEqual(resolveEffectivePublisher({ env: {} }), {
+    policy: { mode: "off" }, source: "default", locked: false, diagnostics: [],
+  });
+  assert.deepEqual(resolveEffectivePublisher({ env: { SHARED_KNOWLEDGE_PUBLISHER: "pr" } }).policy, { mode: "pr" });
+  assert.match(resolveEffectivePublisher({ env: { SHARED_KNOWLEDGE_PUBLISHER: "auto-merge" } }).error ?? "", /Invalid/);
+  assert.match(resolveEffectivePublisher({ env: {}, global: { publisher: { mode: "auto-merge" } } }).error ?? "", /forbidden/);
+  assert.deepEqual(parseKnowledgePublisherArgs("pr --scope workspace --acknowledge"), {
+    action: "set", policy: { mode: "pr" }, scope: "workspace", acknowledged: true,
+  });
+  assert.throws(() => parseKnowledgePublisherArgs("auto-merge --scope global --acknowledge"));
+  assert.deepEqual(decodeConfig({ version: 2, publisher: { mode: "pr" } }), { version: 2, publisher: { mode: "pr" } });
+});
 
 test("model references preserve every slash after provider", () => {
   const policy = parseModelReference("openrouter/anthropic/claude-sonnet-4");

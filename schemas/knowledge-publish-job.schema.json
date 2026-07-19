@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/shared-knowledge/knowledge-publish-job.schema.json",
+  "title": "Shared Knowledge private publish job",
+  "type": "object",
+  "required": ["version", "id", "intentKey", "state", "mode", "createdAt", "updatedAt", "attempts", "inputs"],
+  "properties": {
+    "version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-f0-9]{24}$" },
+    "intentKey": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "state": { "enum": ["pending", "preparing", "validated", "pushed", "pr-open", "waiting", "blocked", "failed", "already-canonical", "merged"] },
+    "mode": { "enum": ["pr", "auto-merge"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "attempts": { "type": "integer", "minimum": 0 },
+    "inputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": { "type": "string" },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "remote": { "type": "string" },
+    "base": { "type": "string" },
+    "baseSha": { "type": "string" },
+    "branch": { "type": "string" },
+    "commitSha": { "type": "string" },
+    "prNumber": { "type": "integer", "minimum": 1 },
+    "prUrl": { "type": "string" },
+    "localValidated": { "type": "boolean" },
+    "worktreePath": { "type": "string" },
+    "diagnostic": { "enum": ["none", "policy-off", "remote-unsupported", "auth-unavailable", "input-stale", "absorption-blocked", "ignored-output", "validation-failed", "ref-race", "transport-failed", "checks-pending", "checks-failed", "merge-conflict", "review-required", "stale-head", "closed-unmerged"] }
+  },
+  "additionalProperties": false
+}
