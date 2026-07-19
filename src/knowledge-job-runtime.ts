@@ -52,6 +52,7 @@ export type ReviewSummary = {
   pending: number;
   approved: number;
   rejected: number;
+  expired: number;
 };
 export type KnowledgeJobResult = {
   candidateCount: number;
@@ -120,6 +121,13 @@ export type ReviewStagingOutcome = {
 export type ReviewDecisionResult = {
   status: "approved" | "rejected" | "already-decided" | "unavailable";
   decision?: ReviewDecision;
+  job?: KnowledgeJob;
+};
+
+export type ReviewCloseResult = {
+  status: "closed" | "actionable" | "unavailable";
+  outcome?: "empty" | "expired";
+  summary?: ReviewSummary;
   job?: KnowledgeJob;
 };
 
@@ -223,11 +231,21 @@ function isMaterializer(value: unknown): value is KnowledgeJobResult["materializ
 }
 
 function persistedReviewSummary(value: unknown): ReviewSummary {
-  if (!isRecord(value)) return { pending: 0, approved: 0, rejected: 0 };
+  if (!isRecord(value)) return { pending: 0, approved: 0, rejected: 0, expired: 0 };
   return {
     pending: boundedNumber(value.pending),
     approved: boundedNumber(value.approved),
     rejected: boundedNumber(value.rejected),
+    expired: boundedNumber(value.expired),
+  };
+}
+
+function expiredReviewSummary(summary: ReviewSummary): ReviewSummary {
+  return {
+    pending: 0,
+    approved: summary.approved,
+    rejected: summary.rejected,
+    expired: summary.expired + summary.pending,
   };
 }
 
@@ -328,7 +346,7 @@ export function createReviewResult(candidates: ReviewCandidate[]): KnowledgeJobR
     materializer: "review",
     written: [],
     ...(candidates.length > 0 ? { reviewCandidates: candidates } : {}),
-    reviewSummary: { pending: candidates.length, approved: 0, rejected: 0 },
+    reviewSummary: { pending: candidates.length, approved: 0, rejected: 0, expired: 0 },
   };
 }
 
@@ -343,7 +361,7 @@ export function batchFollowerPatch(outcome: KnowledgeJob | null | undefined): Pi
       state: "done",
       error: outcome.error,
       payload: undefined,
-      result: { candidateCount: 0, materializer: "review", written: [], reviewSummary: { pending: 0, approved: 0, rejected: 0 } },
+      result: { candidateCount: 0, materializer: "review", written: [], reviewSummary: { pending: 0, approved: 0, rejected: 0, expired: 0 } },
     };
   }
   return {
@@ -495,46 +513,83 @@ export class KnowledgeJobQueue {
     candidateIdentity: (candidate: ReviewCandidate) => string,
     stage: (candidate: ReviewCandidate) => Promise<ReviewStagingOutcome>,
   ): Promise<ReviewDecisionResult> {
-    return this.withReviewLock(`item:${id}:${itemId}`, async () => {
-      const first = this.pendingReviewItem(id, itemId);
-      if (!first.item) return first.result;
-      const identity = candidateIdentity(first.item.candidate);
-      if (!identity) throw new Error("review candidate identity is unavailable");
-      return this.withReviewLock(`candidate:${identity}`, async () => {
-        const fresh = this.pendingReviewItem(id, itemId);
-        if (!fresh.item) return fresh.result;
-        if (candidateIdentity(fresh.item.candidate) !== identity) {
-          return { status: "unavailable" };
-        }
-        const staged = await stage(fresh.item.candidate);
-        const updated = this.storeReviewDecision(id, itemId, {
-          state: "approved",
-          decidedAt: new Date().toISOString(),
-          outcome: staged.outcome,
-          ...(staged.inboxPath ? { inboxPath: staged.inboxPath } : {}),
+    return this.withReviewLock(`job:${id}`, () =>
+      this.withReviewLock(`item:${id}:${itemId}`, async () => {
+        const first = this.pendingReviewItem(id, itemId);
+        if (!first.item) return first.result;
+        const identity = candidateIdentity(first.item.candidate);
+        if (!identity) throw new Error("review candidate identity is unavailable");
+        return this.withReviewLock(`candidate:${identity}`, async () => {
+          const fresh = this.pendingReviewItem(id, itemId);
+          if (!fresh.item) return fresh.result;
+          if (candidateIdentity(fresh.item.candidate) !== identity) {
+            return { status: "unavailable" };
+          }
+          const staged = await stage(fresh.item.candidate);
+          const updated = this.storeReviewDecision(id, itemId, {
+            state: "approved",
+            decidedAt: new Date().toISOString(),
+            outcome: staged.outcome,
+            ...(staged.inboxPath ? { inboxPath: staged.inboxPath } : {}),
+          });
+          return {
+            status: "approved",
+            job: updated,
+            decision: normalizedDecision(updated.result?.reviewDecisions?.[itemId]),
+          };
         });
-        return {
-          status: "approved",
-          job: updated,
-          decision: normalizedDecision(updated.result?.reviewDecisions?.[itemId]),
-        };
-      });
-    });
+      }),
+    );
   }
 
   async rejectReviewItem(id: string, itemId: string): Promise<ReviewDecisionResult> {
-    return this.withReviewLock(`item:${id}:${itemId}`, async () => {
-      const current = this.pendingReviewItem(id, itemId);
-      if (!current.item) return current.result;
-      const updated = this.storeReviewDecision(id, itemId, {
-        state: "rejected",
-        decidedAt: new Date().toISOString(),
-      });
-      return {
-        status: "rejected",
-        job: updated,
-        decision: normalizedDecision(updated.result?.reviewDecisions?.[itemId]),
+    return this.withReviewLock(`job:${id}`, () =>
+      this.withReviewLock(`item:${id}:${itemId}`, async () => {
+        const current = this.pendingReviewItem(id, itemId);
+        if (!current.item) return current.result;
+        const updated = this.storeReviewDecision(id, itemId, {
+          state: "rejected",
+          decidedAt: new Date().toISOString(),
+        });
+        return {
+          status: "rejected",
+          job: updated,
+          decision: normalizedDecision(updated.result?.reviewDecisions?.[itemId]),
+        };
+      }),
+    );
+  }
+
+  async closeUnavailableReviewJob(id: string): Promise<ReviewCloseResult> {
+    return this.withReviewLock(`job:${id}`, async () => {
+      const current = this.read(id);
+      if (!current || current.state !== "review-ready" || current.result?.materializer !== "review") {
+        return { status: "unavailable" };
+      }
+      const candidates = reviewCandidates(current.result);
+      if (candidates && candidates.length > 0) return { status: "actionable" };
+      const legacyEmpty = candidates !== undefined
+        && candidates.length === 0
+        && boundedNumber(current.result.candidateCount) === 0;
+      const unavailable = candidates === undefined
+        && (Boolean(current.purgedAt) || isRecord(current.result.reviewSummary));
+      if (!legacyEmpty && !unavailable) return { status: "unavailable" };
+      const summary = legacyEmpty
+        ? { pending: 0, approved: 0, rejected: 0, expired: 0 }
+        : expiredReviewSummary(this.summaryForJob(current));
+      const result: KnowledgeJobResult = {
+        ...current.result,
+        reviewCandidates: undefined,
+        reviewDecisions: undefined,
+        reviewSummary: summary,
       };
+      const job = this.update(id, {
+        state: "done",
+        nextAttemptAt: undefined,
+        error: undefined,
+        result,
+      });
+      return { status: "closed", outcome: legacyEmpty ? "empty" : "expired", summary, job };
     });
   }
 
@@ -561,24 +616,48 @@ export class KnowledgeJobQueue {
     });
   }
 
-  cleanup({ dryRun = false, now = Date.now() }: { dryRun?: boolean; now?: number } = {}): string[] {
+  async cleanup({ dryRun = false, now = Date.now() }: { dryRun?: boolean; now?: number } = {}): Promise<string[]> {
     const cutoff = now - this.config.retentionDays * 86_400_000;
     const terminal = new Set<JobState>(["done", "review-ready", "skipped", "failed"]);
-    const purged: string[] = [];
-    for (const job of this.list()) {
+    const eligible = (job: KnowledgeJob): boolean => {
       const result = job.result;
-      const hasPrivateDetail = Boolean(job.payload) || Boolean(result?.reviewCandidates) || Boolean(result?.reviewDecisions);
-      if (!terminal.has(job.state) || Date.parse(job.updatedAt) > cutoff || !hasPrivateDetail) continue;
-      purged.push(job.id);
-      if (!dryRun) this.update(job.id, {
-        payload: undefined,
-        purgedAt: new Date(now).toISOString(),
-        result: result ? {
-          ...result,
-          reviewCandidates: undefined,
-          reviewDecisions: undefined,
-          ...(result.materializer === "review" ? { reviewSummary: this.summaryForJob(job) } : {}),
-        } : undefined,
+      const hasPrivateDetail = Boolean(job.payload)
+        || Array.isArray(result?.reviewCandidates)
+        || isRecord(result?.reviewDecisions);
+      return terminal.has(job.state) && Date.parse(job.updatedAt) <= cutoff && hasPrivateDetail;
+    };
+    const purged: string[] = [];
+    for (const snapshot of this.list()) {
+      if (!eligible(snapshot)) continue;
+      if (dryRun) {
+        purged.push(snapshot.id);
+        continue;
+      }
+      await this.withReviewLock(`job:${snapshot.id}`, async () => {
+        const job = this.read(snapshot.id);
+        if (!job || !eligible(job)) return;
+        const result = job.result;
+        const reviewSummary = result?.materializer === "review"
+          ? (job.state === "review-ready"
+            ? expiredReviewSummary(this.summaryForJob(job))
+            : this.summaryForJob(job))
+          : undefined;
+        this.update(job.id, {
+          ...(job.state === "review-ready" ? {
+            state: "done" as const,
+            nextAttemptAt: undefined,
+            error: undefined,
+          } : {}),
+          payload: undefined,
+          purgedAt: new Date(now).toISOString(),
+          result: result ? {
+            ...result,
+            reviewCandidates: undefined,
+            reviewDecisions: undefined,
+            ...(reviewSummary ? { reviewSummary } : {}),
+          } : undefined,
+        });
+        purged.push(job.id);
       });
     }
     return purged;
@@ -611,7 +690,12 @@ export class KnowledgeJobQueue {
   private summaryForJob(job: KnowledgeJob): ReviewSummary {
     const candidates = reviewCandidates(job.result);
     if (!candidates) return persistedReviewSummary(job.result?.reviewSummary);
-    const summary: ReviewSummary = { pending: 0, approved: 0, rejected: 0 };
+    const summary: ReviewSummary = {
+      pending: 0,
+      approved: 0,
+      rejected: 0,
+      expired: persistedReviewSummary(job.result?.reviewSummary).expired,
+    };
     candidates.forEach((candidate, index) => {
       const id = reviewItemIdForCandidate(job.id, index, candidate);
       summary[normalizedDecision(job.result?.reviewDecisions?.[id]).state] += 1;
