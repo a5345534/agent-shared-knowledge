@@ -318,7 +318,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
 
   const confirmPublisherAuthority = async (ctx: ExtensionContext, policy: PublisherPolicy) => {
     if (policy.mode === "off") return true;
-    if (!ctx.hasUI) throw new Error(`${policy.mode} publisher requires --acknowledge outside dialog-capable UI`);
+    if (!ctx.hasUI || ctx.mode !== "tui") throw new Error(`${policy.mode} publisher requires --acknowledge outside local TUI mode`);
     const detail = policy.mode === "auto-merge"
       ? "Approved candidates may be canonically absorbed in isolation, pushed to a PR, and squash merged when checks pass or are absent. Branch protection and required reviews are not bypassed. Continue?"
       : "Approved candidates may be canonically absorbed in isolation, pushed, and opened as pull requests. Continue?";
@@ -611,7 +611,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
           return;
         }
         if (parsed.policy && parsed.policy.mode !== "off" && !parsed.acknowledged) {
-          if (!ctx.hasUI || !await confirmPublisherAuthority(ctx, parsed.policy)) {
+          if (!ctx.hasUI || ctx.mode !== "tui" || !await confirmPublisherAuthority(ctx, parsed.policy)) {
             throw new Error("publisher authority requires --acknowledge or dialog confirmation");
           }
         }

@@ -152,7 +152,7 @@ function processAlive(pid: unknown): boolean {
 
 function normalizeCheckState(value: unknown): "success" | "pending" | "failed" {
   const state = String(value ?? "").toUpperCase();
-  if (["SUCCESS", "NEUTRAL"].includes(state)) return "success";
+  if (state === "SUCCESS") return "success";
   if (["PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "WAITING"].includes(state)) return "pending";
   return "failed";
 }
@@ -336,7 +336,8 @@ export class KnowledgePublisherRuntime {
     if (mode === "off") return this.queue.update(job.id, { state: "waiting", diagnostic: "policy-off" });
     if (job.mode !== mode) job.mode = mode;
     if (job.state === "pushed") return this.recoverPushed(job);
-    if (["preparing", "validated"].includes(job.state)) job.state = "pending";
+    if (job.state === "validated") return this.recoverValidated(job);
+    if (job.state === "preparing") job.state = "pending";
     if (job.state !== "pending") {
       try {
         return this.attemptMerge(this.queue.update(job.id, { attempts: job.attempts + 1 }), this.queue.cwd);
@@ -422,12 +423,13 @@ export class KnowledgePublisherRuntime {
       this.command(["git", "commit", "-m", "docs: publish reviewed shared knowledge"], worktree, "validation-failed", 60_000);
       const commitSha = exactSha(this.command(["git", "rev-parse", "HEAD^{commit}"], worktree, "validation-failed", 30_000));
       const branch = `shared-knowledge/publish-${job.id}`;
+      job = this.queue.update(job.id, { state: "validated", remote: this.remote, base, baseSha, branch, commitSha, localValidated: true });
       const remoteLookup = this.run(["git", "ls-remote", "--heads", this.remote, `refs/heads/${branch}`], worktree, 30_000);
       if (remoteLookup.status !== 0) throw new Error("transport-failed");
       const remoteHead = remoteLookup.stdout.trim();
       if (remoteHead && !remoteHead.startsWith(`${commitSha}\t`)) throw new Error("ref-race");
       if (!remoteHead) this.command(["git", "push", this.remote, `HEAD:refs/heads/${branch}`], worktree, "transport-failed", 120_000);
-      job = this.queue.update(job.id, { state: "pushed", remote: this.remote, base, baseSha, branch, commitSha, localValidated: true });
+      job = this.queue.update(job.id, { state: "pushed" });
 
       const existingRaw = this.command(["gh", "pr", "list", "--head", branch, "--state", "all", "--json", "number,url,state,headRefOid,baseRefName"], worktree, "transport-failed", 30_000);
       const existing = parseJson(existingRaw);
@@ -473,6 +475,23 @@ export class KnowledgePublisherRuntime {
         const info = lstatSync(path);
         if (info.isFile() && !info.isSymbolicLink() && sha256File(path) === input.sha256) unlinkSync(path);
       } catch { /* stale/missing paths are intentionally untouched */ }
+    }
+  }
+
+  private recoverValidated(job: PublishJob): PublishJob {
+    try {
+      if (!job.branch || !job.commitSha || !job.base || !job.baseSha || !job.localValidated) throw new Error("ref-race");
+      this.command(["gh", "auth", "status", "--hostname", "github.com"], this.queue.cwd, "auth-unavailable", 30_000);
+      const lookup = this.run(["git", "ls-remote", "--heads", job.remote ?? this.remote, `refs/heads/${job.branch}`], this.queue.cwd, 30_000);
+      if (lookup.status !== 0) throw new Error("transport-failed");
+      const remoteHead = lookup.stdout.trim();
+      if (remoteHead && !remoteHead.startsWith(`${job.commitSha}\t`)) throw new Error("ref-race");
+      if (!remoteHead) {
+        this.command(["git", "push", job.remote ?? this.remote, `${job.commitSha}:refs/heads/${job.branch}`], this.queue.cwd, "transport-failed", 120_000);
+      }
+      return this.recoverPushed(this.queue.update(job.id, { state: "pushed", attempts: job.attempts + 1 }));
+    } catch (error) {
+      return this.queue.update(job.id, { state: "blocked", diagnostic: checkCategory(error), attempts: job.attempts + 1 });
     }
   }
 
@@ -533,7 +552,13 @@ export class KnowledgePublisherRuntime {
     if (states.includes("failed")) throw new Error("checks-failed");
     if (states.includes("pending")) throw new Error("checks-pending");
     const merged = this.run(["gh", "pr", "merge", String(job.prNumber), "--squash", "--delete-branch"], cwd, 120_000);
-    if (merged.status !== 0) return this.queue.update(job.id, { state: "waiting", diagnostic: "review-required" });
+    if (merged.status !== 0) {
+      const probe = this.run(["gh", "pr", "view", String(job.prNumber), "--json", "state,headRefOid,baseRefName"], cwd, 30_000);
+      return this.queue.update(job.id, {
+        state: "waiting",
+        diagnostic: probe.status === 0 ? "review-required" : "transport-failed",
+      });
+    }
     return this.queue.update(job.id, { state: "merged", diagnostic: "none" });
   }
 }

@@ -167,6 +167,10 @@ test("extension configures materializers and recovers jobs without foreground mu
     idle = false;
 
     const nonUi = { ...ctx, hasUI: false, mode: "print" };
+    await commands.get("knowledge-publisher").handler("auto-merge --scope session", nonUi);
+    assert.match(notifications.at(-1)!, /requires --acknowledge/);
+    await commands.get("knowledge-status").handler("", ctx);
+    assert.match(notifications.at(-1)!, /Publisher source: workspace/, "non-TUI publisher authority must remain unchanged without acknowledgement");
     queue.update(failed.id, { state: "failed", attempts: 3, error: secret });
     await commands.get("knowledge-jobs").handler("", nonUi);
     assert.equal(queue.read(failed.id)?.state, "failed", "non-TUI jobs command must not retry");

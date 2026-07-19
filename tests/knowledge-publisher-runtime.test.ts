@@ -99,6 +99,18 @@ test("PR mode isolates publication and cleans only unchanged approved Inbox inpu
   assert.equal(remoteMutations.some((argv) => argv.includes("--force") || argv.includes("--admin")), false);
 });
 
+test("validated phase recovers a completed remote push without reabsorbing", async () => {
+  const { root, runtime, path } = fixture();
+  const queue = new KnowledgePublisherQueue(root, { SHARED_KNOWLEDGE_RUNTIME_DIR: runtime });
+  const pending = queue.reconcile([reviewJob(path)], "pr")[0]!;
+  const commit = "c".repeat(40);
+  queue.update(pending.id, { state: "validated", remote: "origin", base: "main", baseSha: "b".repeat(40), branch: `shared-knowledge/publish-${pending.id}`, commitSha: commit, localValidated: true });
+  const fake = pipelineRunner(root, { remoteHead: commit });
+  const job = await new KnowledgePublisherRuntime(queue, { absorberScript: "/pkg/absorb.py", lintScript: "/pkg/lint.py", runner: fake.runner }).processNext("pr");
+  assert.equal(job?.state, "pr-open");
+  assert.equal(fake.calls.some((argv) => argv.includes("/pkg/absorb.py")), false);
+});
+
 test("pushed phase recovers PR creation idempotently without reabsorbing", async () => {
   const { root, runtime, path } = fixture();
   const queue = new KnowledgePublisherQueue(root, { SHARED_KNOWLEDGE_RUNTIME_DIR: runtime });
@@ -186,6 +198,7 @@ test("isolated publisher runs real safe-only absorption without touching unrelat
 test("auto-merge gate matrix fails closed without admin", async () => {
   const cases = [
     { name: "failed check", options: { checks: [{ conclusion: "FAILURE" }] }, diagnostic: "checks-failed" },
+    { name: "neutral check", options: { checks: [{ conclusion: "NEUTRAL" }] }, diagnostic: "checks-failed" },
     { name: "cancelled check", options: { checks: [{ conclusion: "CANCELLED" }] }, diagnostic: "checks-failed" },
     { name: "conflict", options: { mergeable: "CONFLICTING" }, diagnostic: "merge-conflict" },
     { name: "unknown mergeability", options: { mergeable: "UNKNOWN" }, diagnostic: "checks-pending" },
