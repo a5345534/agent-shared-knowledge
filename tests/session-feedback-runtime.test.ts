@@ -179,6 +179,20 @@ test("manual promotion, splitting, suppression, and deletion remain local operat
   assert.equal(store.ingest("session-e", [finding()]).findings[0]?.disposition, "suppressed");
 });
 
+test("removing a finding and purging a session remove only private cluster contributions", () => {
+  const { store, advance } = fixture();
+  const first = store.ingest("session-a", [finding()]).findings[0]!;
+  advance(1);
+  store.ingest("session-b", [finding()]);
+  assert.equal(store.summary().readyForReview, 1);
+  assert.equal(store.removeFinding(first.id), true);
+  assert.equal(store.summary().readyForReview, 0);
+  assert.equal(store.purgeSession("session-b"), 1);
+  assert.equal(store.report("session-a").findingsForSession.length, 0);
+  assert.equal(store.report("session-b").findingsForSession.length, 0);
+  assert.equal(store.queue().length, 0);
+});
+
 test("GitHub search and submit use only the trusted repository after explicit runtime calls", () => {
   const { store, calls, advance } = fixture();
   store.ingest("session-a", [finding()]);

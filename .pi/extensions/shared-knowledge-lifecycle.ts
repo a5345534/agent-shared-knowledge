@@ -647,24 +647,57 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       ctx.ui.notify(`${feedbackSummaryText(ctx)}\nOpen /knowledge-feedback in local TUI to inspect private findings.`, "info");
       return;
     }
-    const report = store.report(feedbackSessionSourceFor(ctx));
+    const sessionSource = feedbackSessionSourceFor(ctx);
+    const report = store.report(sessionSource);
     if (report.findingsForSession.length === 0) {
       ctx.ui.notify("shared-knowledge feedback: no retained findings for this session", "info");
       return;
     }
+    const purgeLabel = "Purge all retained feedback for this session";
     const labels = new Map(report.findingsForSession.map((finding) => [
       `${finding.id} · ${finding.classification} · ${finding.component.id} · ${finding.clusterId ? "clustered" : "local"}`,
       finding.id,
     ]));
-    const selected = await ctx.ui.select("Session feedback report", [...labels.keys()]);
-    const id = selected ? labels.get(selected) : undefined;
+    const selected = await ctx.ui.select("Session feedback report", [...labels.keys(), purgeLabel]);
+    if (!selected) return;
+    if (selected === purgeLabel) {
+      if (!await ctx.ui.confirm("Purge session feedback", "This removes only private feedback findings and their cluster contributions. It does not modify knowledge, Git, or GitHub. Continue?")) return;
+      ctx.ui.notify(`shared-knowledge feedback: purged ${store.purgeSession(sessionSource)} finding(s)`, "info");
+      return;
+    }
+    const id = labels.get(selected);
     if (!id) return;
+    const finding = store.finding(id);
     const detail = feedbackFindingText(id, store);
-    if (!detail) {
+    if (!finding || !detail) {
       ctx.ui.notify("shared-knowledge feedback: selected finding is unavailable", "warning");
       return;
     }
-    await ctx.ui.editor("Private session feedback finding", detail);
+    const action = await ctx.ui.select("Session feedback finding action", [
+      "View private detail",
+      "Dismiss finding",
+      "Remove finding permanently",
+      "Suppress this classification for this component",
+    ]);
+    if (!action || action === "View private detail") {
+      if (action) await ctx.ui.editor("Private session feedback finding", detail);
+      return;
+    }
+    if (action === "Dismiss finding") {
+      if (!await ctx.ui.confirm("Dismiss session finding", "This changes only private feedback state. Continue?")) return;
+      ctx.ui.notify(store.dismissFinding(id) ? "shared-knowledge feedback: finding dismissed" : "shared-knowledge feedback: finding is unavailable", "info");
+      return;
+    }
+    if (action === "Remove finding permanently") {
+      if (!await ctx.ui.confirm("Remove session finding", "This removes the finding and its private cluster contribution. It does not modify knowledge, Git, or GitHub. Continue?")) return;
+      ctx.ui.notify(store.removeFinding(id) ? "shared-knowledge feedback: finding removed" : "shared-knowledge feedback: finding is unavailable", "info");
+      return;
+    }
+    if (action === "Suppress this classification for this component") {
+      if (!await ctx.ui.confirm("Suppress feedback classification", "Future matching findings remain private and will not enter the upstream queue. Continue?")) return;
+      store.suppress(finding.classification, finding.component.id, finding.repository);
+      ctx.ui.notify("shared-knowledge feedback: classification suppressed locally", "info");
+    }
   };
   const openIssueQueueUi = async (ctx: ExtensionContext) => {
     const store = feedbackStoreFor(ctx.cwd);
