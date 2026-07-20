@@ -735,11 +735,12 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     }
     const labels = new Map(summaries.map((summary) => [
       `${summary.id} · ${summary.state} · sessions=${summary.independentSessionCount} · ${summary.title}`,
-      summary.id,
+      summary,
     ]));
     const selected = await ctx.ui.select("Private upstream issue queue", [...labels.keys()]);
-    const id = selected ? labels.get(selected) : undefined;
-    if (!id) return;
+    const selectedSummary = selected ? labels.get(selected) : undefined;
+    if (!selectedSummary) return;
+    const id = selectedSummary.id;
     const cluster = store.cluster(id);
     if (!cluster) {
       ctx.ui.notify("shared-knowledge feedback: selected candidate is unavailable", "warning");
@@ -764,7 +765,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
         `Repository: ${cluster.repository}`,
         `Component: ${cluster.component.kind}/${cluster.component.id}`,
         `Classification: ${cluster.classification}`,
-        `Independent sessions: ${new Set(cluster.findingIds.map((findingId) => store.finding(findingId)?.sessionFingerprint).filter(Boolean)).size}`,
+        `Independent sessions: ${selectedSummary.independentSessionCount}`,
         "", "Matching reasons:", ...cluster.matchReasons.map((reason) => `- ${sanitizeFeedbackText(reason, 240) ?? "(unavailable)"}`),
       ].join("\n");
       await ctx.ui.editor("Private issue candidate metadata", detail);
