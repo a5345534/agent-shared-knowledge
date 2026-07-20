@@ -2,6 +2,7 @@
   "name": "agent-shared-knowledge",
   "version": "0.1.1",
   "description": "Workspace-level shared fact storage layer for cross-agent, cross-platform collaboration",
+  "repository": "https://github.com/a5345534/agent-shared-knowledge.git",
   "type": "module",
   "keywords": [
     "pi-package",

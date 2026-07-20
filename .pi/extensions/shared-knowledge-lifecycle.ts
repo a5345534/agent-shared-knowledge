@@ -2,6 +2,7 @@
 import { complete } from "@earendil-works/pi-ai/compat";
 import { convertToLlm, getAgentDir, serializeConversation, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,18 +64,36 @@ import {
   extractionRetryInstruction,
   parseCandidateAssistantResponse,
 } from "../../src/candidate-response.ts";
+import { defaultFeedbackProvenance, SessionFeedbackStore, sanitizeFeedbackText } from "../../src/session-feedback-runtime.ts";
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PROMPT_FILE = join(PACKAGE_ROOT, ".pi", "prompts", "compact-review.md");
 const ABSORBER_SCRIPT = join(PACKAGE_ROOT, "scripts", "knowledge_absorb.py");
 const SOURCES_SCRIPT = join(PACKAGE_ROOT, "scripts", "knowledge_sources.py");
 const LINT_SCRIPT = join(PACKAGE_ROOT, "scripts", "knowledge_lint.py");
+
+function packageRepository(): string | undefined {
+  try {
+    const value = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as unknown;
+    if (!value || typeof value !== "object") return undefined;
+    const repository = (value as { repository?: unknown }).repository;
+    if (typeof repository === "string") return repository;
+    if (repository && typeof repository === "object" && typeof (repository as { url?: unknown }).url === "string") {
+      return (repository as { url: string }).url;
+    }
+  } catch {
+    // Unavailable metadata leaves the component unresolved and local-only.
+  }
+  return undefined;
+}
+
+const PACKAGE_REPOSITORY = packageRepository();
 const running = new Set<string>();
 const timers = new Map<string, NodeJS.Timeout>();
 const busy = new Set<string>();
 const CANDIDATE_SUBMISSION_TOOL = {
   name: CANDIDATE_SUBMISSION_TOOL_NAME,
-  description: "Submit zero or more strictly structured durable shared-knowledge candidates.",
+  description: "Submit strictly structured durable shared-knowledge candidates and optional private session feedback findings.",
   parameters: Type.Object({
     candidates: Type.Array(Type.Object({
       name: Type.String({ minLength: 1, maxLength: 80 }),
@@ -91,6 +110,41 @@ const CANDIDATE_SUBMISSION_TOOL = {
       candidate_id: Type.String({ minLength: 1 }),
       evidence: Type.Optional(Type.Array(Type.String())),
     })),
+    // Optional feedback is independently validated and never blocks the
+    // existing candidate path when absent or malformed.
+    feedback_findings: Type.Optional(Type.Array(Type.Object({
+      classification: Type.Union([
+        Type.Literal("upstream-bug"),
+        Type.Literal("documentation-gap"),
+        Type.Literal("ux-friction"),
+        Type.Literal("feature-request"),
+        Type.Literal("local-configuration"),
+        Type.Literal("agent-behavior"),
+        Type.Literal("unresolved-owner"),
+        Type.Literal("insufficient-evidence"),
+      ]),
+      component_kind: Type.Union([
+        Type.Literal("extension"),
+        Type.Literal("skill"),
+        Type.Literal("package"),
+        Type.Literal("pi-core"),
+        Type.Literal("project"),
+        Type.Literal("local"),
+        Type.Literal("unknown"),
+      ]),
+      component_id: Type.String({ minLength: 1, maxLength: 120 }),
+      user_goal: Type.String({ minLength: 1, maxLength: 1200 }),
+      expected: Type.String({ minLength: 1, maxLength: 1200 }),
+      observed: Type.String({ minLength: 1, maxLength: 1200 }),
+      operation: Type.Optional(Type.String({ maxLength: 80 })),
+      error_category: Type.Optional(Type.String({ maxLength: 80 })),
+      component_version: Type.Optional(Type.String({ maxLength: 80 })),
+      workaround: Type.Optional(Type.String({ maxLength: 1200 })),
+      evidence_summary: Type.Optional(Type.String({ maxLength: 400 })),
+      normalized_goal: Type.Optional(Type.String({ maxLength: 240 })),
+      normalized_gap: Type.Optional(Type.String({ maxLength: 240 })),
+      normalized_outcome: Type.Optional(Type.String({ maxLength: 240 })),
+    }))),
   }),
 };
 
@@ -119,11 +173,13 @@ function runSourceAck(cwd: string, instanceId: string, runId: string): Promise<v
 function promptText(): string {
   return existsSync(PROMPT_FILE)
     ? readFileSync(PROMPT_FILE, "utf8")
-    : "Extract durable shared-knowledge candidates as JSON with a candidates array.";
+    : "Extract durable shared-knowledge candidates and optional private feedback findings as JSON with a candidates array.";
 }
 
 export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
   const queues = new Map<string, KnowledgeJobQueue>();
+  const feedbackStores = new Map<string, SessionFeedbackStore>();
+  const feedbackSessionNonces = new Map<object | string, string>();
   const sessionModelPolicies = new Map<object | string, ModelPolicy>();
   const sessionMaterializerPolicies = new Map<object | string, MaterializerPolicy>();
   const sessionPublisherPolicies = new Map<object | string, PublisherPolicy>();
@@ -144,6 +200,30 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
   };
   // Passive status/recovery views must never call recoverRunning().
   const viewQueueFor = (cwd: string) => queues.get(cwd) ?? new KnowledgeJobQueue(cwd);
+  const feedbackStoreFor = (cwd: string) => {
+    let store = feedbackStores.get(cwd);
+    if (!store) {
+      store = new SessionFeedbackStore(cwd, { provenance: defaultFeedbackProvenance(PACKAGE_REPOSITORY) });
+      feedbackStores.set(cwd, store);
+    }
+    return store;
+  };
+  /**
+   * Persisted sessions are fingerprinted from their private file source by the
+   * feedback store. Unsaved sessions receive one opaque lifecycle nonce so
+   * repeated compact segments do not masquerade as independent sessions.
+   */
+  const feedbackSessionSourceFor = (ctx: ExtensionContext): string => {
+    const file = ctx.sessionManager.getSessionFile();
+    if (file) return file;
+    const key = ctx.sessionManager as object;
+    let nonce = feedbackSessionNonces.get(key);
+    if (!nonce) {
+      nonce = randomUUID();
+      feedbackSessionNonces.set(key, nonce);
+    }
+    return `memory:${nonce}`;
+  };
   const sessionPolicyFor = <T,>(policies: Map<object | string, T>, ctx: ExtensionContext): T | undefined => {
     const direct = policies.get(ctx.sessionManager);
     const file = ctx.sessionManager.getSessionFile();
@@ -233,6 +313,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     const publisher = effectivePublisherFor(ctx);
     const queue = viewQueueFor(ctx.cwd);
     const publishJobs = publisherQueueFor(ctx.cwd).summaries();
+    const feedback = feedbackStoreFor(ctx.cwd).summary();
     const counts = summarizeQueue(queue.list());
     const configuredModel = model.policy ? formatModelPolicy(model.policy) : "invalid environment value";
     const activeDetail = model.policy?.mode === "active"
@@ -258,6 +339,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       `Publisher jobs: ${Object.entries(publishCounts).map(([state, count]) => `${state}=${count}`).join(" ") || "none"}`,
       `Runtime: ${queue.root}`,
       `Jobs: pending=${counts.pending} running=${counts.running} retry-wait=${counts["retry-wait"]} failed=${counts.failed} review-ready=${counts["review-ready"]}`,
+      `Feedback: findings=${feedback.findings} local-only=${feedback.localOnly} tracking=${feedback.tracking} ready=${feedback.readyForReview} linked=${feedback.linked} submitted=${feedback.submitted}`,
       ...model.diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),
       ...materializer.diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),
       ...publisher.diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),
@@ -508,7 +590,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
                   : "shared-knowledge: candidate staged in Inbox",
                 "info",
               );
-              if (outcome.job?.state === "done" && reconcilePublisher(ctx).length > 0) schedule(ctx, 0);
+              if (outcome.job?.state === "done" && reconcilePublisher(ctx).length > 0 && (ctx as { isIdle?: () => boolean }).isIdle?.()) schedule(ctx, 0);
             } else if (outcome.status === "already-decided") {
               ctx.ui.notify("shared-knowledge: candidate is no longer pending", "warning");
             } else {
@@ -535,6 +617,184 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       }
     }
   };
+
+  const feedbackSummaryText = (ctx: ExtensionContext) => {
+    const summary = feedbackStoreFor(ctx.cwd).summary();
+    return `shared-knowledge feedback: findings=${summary.findings} local-only=${summary.localOnly} insufficient=${summary.insufficient} tracking=${summary.tracking} ready=${summary.readyForReview} linked=${summary.linked} submitted=${summary.submitted}`;
+  };
+  const feedbackFindingText = (id: string, store: SessionFeedbackStore) => {
+    const finding = store.finding(id);
+    if (!finding) return undefined;
+    const text = (value: string | undefined) => sanitizeFeedbackText(value, 1_200) ?? "(unavailable)";
+    return [
+      `Classification: ${finding.classification}`,
+      `Component: ${finding.component.kind}/${finding.component.id}`,
+      `Repository: ${finding.repository ?? "unresolved"}`,
+      `Disposition: ${finding.disposition}`,
+      "",
+      "User goal:", text(finding.userGoal),
+      "",
+      "Expected:", text(finding.expected),
+      "",
+      "Observed:", text(finding.observed),
+      ...(finding.workaround ? ["", "Workaround:", text(finding.workaround)] : []),
+      ...(finding.evidenceSummary ? ["", "Safe evidence summary:", text(finding.evidenceSummary)] : []),
+    ].join("\n");
+  };
+  const openFeedbackUi = async (ctx: ExtensionContext) => {
+    const store = feedbackStoreFor(ctx.cwd);
+    if (ctx.mode !== "tui") {
+      ctx.ui.notify(`${feedbackSummaryText(ctx)}\nOpen /knowledge-feedback in local TUI to inspect private findings.`, "info");
+      return;
+    }
+    const report = store.report(feedbackSessionSourceFor(ctx));
+    if (report.findingsForSession.length === 0) {
+      ctx.ui.notify("shared-knowledge feedback: no retained findings for this session", "info");
+      return;
+    }
+    const labels = new Map(report.findingsForSession.map((finding) => [
+      `${finding.id} · ${finding.classification} · ${finding.component.id} · ${finding.clusterId ? "clustered" : "local"}`,
+      finding.id,
+    ]));
+    const selected = await ctx.ui.select("Session feedback report", [...labels.keys()]);
+    const id = selected ? labels.get(selected) : undefined;
+    if (!id) return;
+    const detail = feedbackFindingText(id, store);
+    if (!detail) {
+      ctx.ui.notify("shared-knowledge feedback: selected finding is unavailable", "warning");
+      return;
+    }
+    await ctx.ui.editor("Private session feedback finding", detail);
+  };
+  const openIssueQueueUi = async (ctx: ExtensionContext) => {
+    const store = feedbackStoreFor(ctx.cwd);
+    if (ctx.mode !== "tui") {
+      ctx.ui.notify(`${feedbackSummaryText(ctx)}\nOpen /knowledge-issue-queue in local TUI to inspect or submit candidates.`, "info");
+      return;
+    }
+    const summaries = store.queue();
+    if (summaries.length === 0) {
+      ctx.ui.notify("shared-knowledge feedback: no upstream issue candidates in this workspace", "info");
+      return;
+    }
+    const labels = new Map(summaries.map((summary) => [
+      `${summary.id} · ${summary.state} · sessions=${summary.independentSessionCount} · ${summary.title}`,
+      summary.id,
+    ]));
+    const selected = await ctx.ui.select("Private upstream issue queue", [...labels.keys()]);
+    const id = selected ? labels.get(selected) : undefined;
+    if (!id) return;
+    const cluster = store.cluster(id);
+    if (!cluster) {
+      ctx.ui.notify("shared-knowledge feedback: selected candidate is unavailable", "warning");
+      return;
+    }
+    const actions = [
+      "View candidate metadata",
+      ...(cluster.draft ? ["View redacted draft", "Edit redacted draft"] : []),
+      ...(cluster.state === "tracking" ? ["Manually promote candidate"] : []),
+      ...(cluster.findingIds.length > 1 ? ["Split one finding into a new cluster"] : []),
+      ...(cluster.state === "ready-for-review" || cluster.state === "manually-promoted"
+        ? ["Search GitHub for duplicates", "Link existing GitHub issue", "Submit GitHub issue"]
+        : []),
+      "Dismiss candidate",
+      "Suppress this classification for this component",
+    ];
+    const action = await ctx.ui.select("Issue candidate action", actions);
+    if (!action) return;
+    if (action === "View candidate metadata") {
+      const detail = [
+        `State: ${cluster.state}`,
+        `Repository: ${cluster.repository}`,
+        `Component: ${cluster.component.kind}/${cluster.component.id}`,
+        `Classification: ${cluster.classification}`,
+        `Independent sessions: ${new Set(cluster.findingIds.map((findingId) => store.finding(findingId)?.sessionFingerprint).filter(Boolean)).size}`,
+        "", "Matching reasons:", ...cluster.matchReasons.map((reason) => `- ${sanitizeFeedbackText(reason, 240) ?? "(unavailable)"}`),
+      ].join("\n");
+      await ctx.ui.editor("Private issue candidate metadata", detail);
+      return;
+    }
+    if (action === "View redacted draft" && cluster.draft) {
+      await ctx.ui.editor("Redacted GitHub issue draft", `${cluster.draft.title}\n\n${cluster.draft.body}`);
+      return;
+    }
+    if (action === "Edit redacted draft" && cluster.draft) {
+      const title = await ctx.ui.input("Issue title", cluster.draft.title);
+      if (title === undefined) return;
+      const body = await ctx.ui.editor("Issue body", cluster.draft.body);
+      if (body === undefined) return;
+      const updated = store.updateDraft(id, title, body);
+      ctx.ui.notify(updated ? "shared-knowledge feedback: local draft updated" : "shared-knowledge feedback: draft update was rejected", updated ? "info" : "warning");
+      return;
+    }
+    if (action === "Manually promote candidate") {
+      if (!await ctx.ui.confirm("Manually promote candidate", "This bypasses the two-session automatic readiness rule but does not contact GitHub. Continue?")) return;
+      ctx.ui.notify(store.manualPromote(id) ? "shared-knowledge feedback: candidate manually promoted" : "shared-knowledge feedback: candidate is unavailable", "info");
+      return;
+    }
+    if (action === "Split one finding into a new cluster") {
+      const choices = cluster.findingIds.map((findingId) => {
+        const finding = store.finding(findingId);
+        return `${findingId} · ${finding?.classification ?? "unavailable"} · ${finding?.component.id ?? "unavailable"}`;
+      });
+      const selectedFinding = await ctx.ui.select("Select finding to split", choices);
+      const findingId = selectedFinding?.split(" · ", 1)[0];
+      if (!findingId) return;
+      ctx.ui.notify(store.splitCluster(id, [findingId]) ? "shared-knowledge feedback: candidate cluster split" : "shared-knowledge feedback: split was unavailable", "info");
+      return;
+    }
+    if (action === "Search GitHub for duplicates") {
+      const result = store.searchDuplicates(id);
+      ctx.ui.notify(result.status === "ok"
+        ? `shared-knowledge feedback: duplicate search returned ${result.results.length} bounded result(s)`
+        : "shared-knowledge feedback: duplicate search failed; candidate remains local and retryable", result.status === "ok" ? "info" : "warning");
+      return;
+    }
+    if (action === "Link existing GitHub issue") {
+      const url = await ctx.ui.input("Existing issue URL", `https://github.com/${cluster.repository}/issues/`);
+      if (url === undefined) return;
+      const linked = store.linkExistingIssue(id, url);
+      ctx.ui.notify(linked
+        ? "shared-knowledge feedback: linked existing GitHub issue locally"
+        : "shared-knowledge feedback: URL was rejected", linked ? "info" : "warning");
+      return;
+    }
+    if (action === "Submit GitHub issue" && cluster.draft) {
+      const reviewedTitle = await ctx.ui.input("Review final sanitized GitHub issue title", cluster.draft.title);
+      if (reviewedTitle === undefined) return;
+      const reviewedBody = await ctx.ui.editor("Review final sanitized GitHub issue body", cluster.draft.body);
+      if (reviewedBody === undefined) return;
+      if (!store.updateDraft(id, reviewedTitle, reviewedBody)) {
+        ctx.ui.notify("shared-knowledge feedback: final draft was rejected", "warning");
+        return;
+      }
+      if (!await ctx.ui.confirm("Create GitHub issue", `Create this issue in ${cluster.repository}? This is a public external action.`)) return;
+      const submitted = store.submit(id);
+      ctx.ui.notify(submitted
+        ? `shared-knowledge feedback: GitHub issue submitted: ${submitted.url}`
+        : "shared-knowledge feedback: GitHub submission failed; candidate remains local and retryable", submitted ? "info" : "warning");
+      return;
+    }
+    if (action === "Dismiss candidate") {
+      if (!await ctx.ui.confirm("Dismiss issue candidate", "This only changes private local feedback state. Continue?")) return;
+      ctx.ui.notify(store.dismissCluster(id) ? "shared-knowledge feedback: candidate dismissed" : "shared-knowledge feedback: candidate is unavailable", "info");
+      return;
+    }
+    if (action === "Suppress this classification for this component") {
+      if (!await ctx.ui.confirm("Suppress feedback classification", "Future matching findings remain private and will not enter the upstream queue. Continue?")) return;
+      store.suppress(cluster.classification, cluster.component.id, cluster.repository);
+      ctx.ui.notify("shared-knowledge feedback: classification suppressed locally", "info");
+    }
+  };
+
+  pi.registerCommand("knowledge-feedback", {
+    description: "View the private quality report for the current Shared Knowledge session",
+    handler: async (_args, ctx) => openFeedbackUi(ctx),
+  });
+  pi.registerCommand("knowledge-issue-queue", {
+    description: "Review private upstream issue candidates and explicitly submit GitHub drafts",
+    handler: async (_args, ctx) => openIssueQueueUi(ctx),
+  });
 
   pi.registerCommand("knowledge-model", {
     description: "Choose the Shared Knowledge background extraction model",
@@ -638,6 +898,8 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
         "Flush reviewed publication",
         "Recover failed jobs",
         "Review ready candidates",
+        "View session feedback report",
+        "Open upstream issue queue",
         "Show status",
       ]);
       if (action === "Change extraction model") await configureModelInteractively(ctx);
@@ -653,6 +915,8 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       }
       else if (action === "Recover failed jobs") await openJobsUi(ctx);
       else if (action === "Review ready candidates") await openReviewUi(ctx);
+      else if (action === "View session feedback report") await openFeedbackUi(ctx);
+      else if (action === "Open upstream issue queue") await openIssueQueueUi(ctx);
       else if (action === "Show status") showStatus(ctx);
     },
   });
@@ -714,6 +978,22 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
         source_revision: job.payload.source.revision,
         evidence_paths: job.payload.source.evidencePaths ?? [],
       } : candidate);
+    // Feedback is deliberately best-effort and isolated from candidate
+    // materialization. Its store receives only validated redacted fields.
+    const feedbackInputs = Array.isArray(parsed.feedback_findings) ? parsed.feedback_findings : [];
+    if (feedbackInputs.length > 0) {
+      try {
+        const feedback = feedbackStoreFor(ctx.cwd).ingest(job.payload.sessionId, feedbackInputs);
+        if (feedback.findings.length > 0) {
+          ctx.ui.setWidget("shared-knowledge-feedback", [
+            `Session feedback retained: findings=${feedback.findings.length} tracking=${feedback.summary.tracking} ready=${feedback.summary.readyForReview}`,
+          ]);
+        }
+      } catch {
+        // A feedback failure cannot turn a successful knowledge job into a retry.
+        ctx.ui.notify("shared-knowledge feedback: analysis was not retained", "warning");
+      }
+    }
     const result = await materializeCandidates(materializer, candidates, ctx.cwd);
     if (result.mode === "inbox" && result.written.length > 0) await runAbsorber(ctx.cwd);
     if (job.payload.source) {
@@ -859,7 +1139,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     try {
       // Capture only: no credential lookup, network request, model call, or absorption.
       const conversation = serializeConversation(convertToLlm(messages));
-      const sessionId = ctx.sessionManager.getSessionFile() ?? `memory:${ctx.cwd}`;
+      const sessionId = feedbackSessionSourceFor(ctx);
       const payload = createCapturedPayload(ctx.cwd, sessionId, conversation);
       const { created } = queueFor(ctx.cwd).enqueue(payload, ctx.model?.id);
       if (created) ctx.ui.setWidget("shared-knowledge", ["Knowledge extraction queued"]);
@@ -890,5 +1170,6 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     updateSessionPolicy(sessionModelPolicies, ctx);
     updateSessionPolicy(sessionMaterializerPolicies, ctx);
     updateSessionPolicy(sessionPublisherPolicies, ctx);
+    feedbackSessionNonces.delete(ctx.sessionManager as object);
   });
 }

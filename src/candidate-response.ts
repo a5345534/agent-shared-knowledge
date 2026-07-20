@@ -1,4 +1,9 @@
-export type CandidateEnvelope<T = unknown> = { candidates: T[] };
+/**
+ * `feedback_findings` is deliberately optional and independently validated by
+ * the feedback runtime. Candidate extraction remains compatible with older
+ * envelopes that contain only `candidates`.
+ */
+export type CandidateEnvelope<T = unknown, F = unknown> = { candidates: T[]; feedback_findings?: F[] };
 export const CANDIDATE_SUBMISSION_TOOL_NAME = "submit_shared_knowledge_candidates";
 const MAX_TOOL_ARGUMENT_BYTES = 1024 * 1024;
 

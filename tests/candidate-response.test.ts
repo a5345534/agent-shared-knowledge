@@ -80,6 +80,26 @@ test("assistant response accepts structured object and bounded JSON-string argum
   );
 });
 
+test("candidate response preserves optional feedback findings without changing candidates", () => {
+  const parsed = parseCandidateAssistantResponse([{
+    type: "toolCall",
+    name: CANDIDATE_SUBMISSION_TOOL_NAME,
+    arguments: {
+      candidates: [{ candidate_id: "durable" }],
+      feedback_findings: [{ classification: "local-configuration", component_id: "origin", observed: "remote unavailable" }],
+    },
+  }], "toolUse");
+  assert.deepEqual(parsed.candidates, [{ candidate_id: "durable" }]);
+  assert.deepEqual(parsed.feedback_findings, [{ classification: "local-configuration", component_id: "origin", observed: "remote unavailable" }]);
+
+  const malformedOptional = parseCandidateAssistantResponse([{
+    type: "toolCall",
+    name: CANDIDATE_SUBMISSION_TOOL_NAME,
+    arguments: { candidates: [{ candidate_id: "still-valid" }], feedback_findings: "not-an-array" },
+  }], "toolUse");
+  assert.deepEqual(malformedOptional.candidates, [{ candidate_id: "still-valid" }]);
+});
+
 test("tool-only responses classify every unusable expected argument shape", () => {
   const cases: Array<[unknown, string, string]> = [
     [{}, "tool-arguments-normalized-empty", "argumentShape=empty-object"],

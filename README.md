@@ -437,6 +437,48 @@ decision detail follows the normal terminal retention window. Expiry atomically
 moves unresolved pending counts to the safe `expired` aggregate, marks the job
 done, and purges private detail so dead `review-ready` rows do not remain.
 
+### Private session feedback and local upstream issue queue
+
+The background compact-session analysis can also retain bounded, redacted session
+feedback findings. This is a **local, per-workspace** quality ledger: it is not
+shared with other users and does not create GitHub issues automatically.
+
+```text
+/knowledge-feedback       # current session's local quality report
+/knowledge-issue-queue    # private cross-session upstream candidates
+```
+
+A finding is classified as local configuration, agent behavior, unresolved
+ownership, insufficient evidence, or an upstream bug/documentation/UX/feature
+candidate. Only candidates whose component repository is resolved from trusted
+installed package metadata can enter the outbound queue. Raw conversation text,
+session paths, credentials, command argv, and raw tool/model output are not
+stored in the feedback state.
+
+For automatic readiness, a candidate needs two compatible observations from
+independent sessions within 90 days. Repeated compactions or retries in one
+session count once. UX/documentation findings can be semantically normalized,
+but they must also match repository, component, user goal, expected-versus-
+observed gap, and workaround/outcome. The queue shows why findings were merged;
+you can split, dismiss, suppress, or manually promote a candidate locally.
+
+GitHub is an explicit outbound boundary. In the local TUI, select a ready
+candidate to inspect/edit its redacted draft, explicitly search for duplicates,
+link an existing issue, or confirm creation through your existing `gh`
+authentication. The package never stores GitHub credentials, uses no workspace
+remote as an issue destination, and leaves a failed submission retryable.
+Non-TUI/RPC/print output contains aggregate-safe guidance only.
+
+If an installed skill or extension has no package metadata that identifies its
+repository, an operator can provide an explicit process-local provenance map;
+the model itself never selects the destination:
+
+```bash
+export SHARED_KNOWLEDGE_FEEDBACK_PROVENANCE='[
+  {"component_kind":"skill","component_id":"my-skill","repository":"owner/repo"}
+]'
+```
+
 ### Reviewed knowledge PR publishing
 
 Reviewed Inbox candidates can be published without committing unrelated worktree
@@ -497,6 +539,7 @@ knowledge-jobs --root . purge --retention-days 7
 | `SHARED_KNOWLEDGE_EXCLUDE_PATTERNS` | `[]` | JSON string array of lines to omit before capture |
 | `SHARED_KNOWLEDGE_JOB_RETENTION_DAYS` | `7` | Terminal private-payload retention |
 | `SHARED_KNOWLEDGE_RUNTIME_DIR` | Git/XDG state | Private runtime base override |
+| `SHARED_KNOWLEDGE_FEEDBACK_PROVENANCE` | none | Explicit private JSON component-to-`owner/repo` map for feedback routing |
 | `SHARED_KNOWLEDGE_MATERIALIZER` | `review` | Legacy materializer fallback: `review`, `inbox`, or `command` |
 | `SHARED_KNOWLEDGE_MATERIALIZER_COMMAND` | none | Required JSON argv binding when effective mode is `command`; never persisted by Pi |
 | `SHARED_KNOWLEDGE_PUBLISHER` | `off` | Read-only deployment fallback: `off` or `pr`; environment `auto-merge` is forbidden |

@@ -32,11 +32,12 @@ Extract ONLY these kinds of facts:
 ## Output format
 
 When a `submit_shared_knowledge_candidates` tool is available, call that tool
-exactly once with a single `candidates` array. Otherwise, return a JSON object
-with a single key `candidates` containing the array. If no durable facts are
-found, submit or return `{"candidates": []}`.
+exactly once with a `candidates` array and an optional `feedback_findings`
+array. Otherwise, return a JSON object containing `candidates` and optional
+`feedback_findings`. If no durable facts or feedback findings are found, submit
+or return `{"candidates": []}`.
 
-Each candidate object MUST have these fields:
+Each durable knowledge candidate object MUST have these fields:
 
 ```json
 {
@@ -50,6 +51,46 @@ Each candidate object MUST have these fields:
   "evidence": ["Source-specific evidence from the conversation"]
 }
 ```
+
+### Session feedback findings
+
+`feedback_findings` is optional. Use it only for a bounded, actionable observation
+about session quality, a skill, an extension, a package, Pi, or the local
+environment. It is independent from durable knowledge candidates; use an empty
+or omitted array when no finding is justified.
+
+Each finding MUST use this shape:
+
+```json
+{
+  "classification": "upstream-bug | documentation-gap | ux-friction | feature-request | local-configuration | agent-behavior | unresolved-owner | insufficient-evidence",
+  "component_kind": "extension | skill | package | pi-core | project | local | unknown",
+  "component_id": "stable-component-identifier",
+  "user_goal": "Short normalized user goal, not a quote",
+  "expected": "Expected behavior",
+  "observed": "Observed behavior",
+  "operation": "optional-stable-operation",
+  "error_category": "optional-normalized-error-category",
+  "component_version": "optional-version",
+  "workaround": "optional-safe-workaround-summary",
+  "evidence_summary": "optional-safe-summary, never transcript text",
+  "normalized_goal": "optional-short-semantic-key",
+  "normalized_gap": "optional-short-semantic-key",
+  "normalized_outcome": "optional-short-semantic-key"
+}
+```
+
+Rules for `feedback_findings`:
+
+- Prefer `local-configuration`, `agent-behavior`, `unresolved-owner`, or
+  `insufficient-evidence` when an upstream component is not clearly at fault.
+- Do not invent a GitHub repository, issue URL, version, or error code.
+- Do not quote the conversation, copy tool output, include usernames, absolute
+  paths, credentials, tokens, command argv, or private repository names.
+- For UX/documentation friction, normalize the same goal, gap, and workaround
+  consistently so independent sessions can be compared later.
+- A finding is an observation, not a public issue. Never claim an issue was
+  submitted or ask to submit one.
 
 ### Type guidance
 
