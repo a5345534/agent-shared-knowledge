@@ -86,7 +86,10 @@ test("feedback persistence redacts paths, credentials, terminal controls, and ra
 
 test("two independent compatible sessions produce one ready candidate while repeats do not", () => {
   const { store, advance } = fixture();
-  const first = store.ingest("session-a", [finding()]);
+  const first = store.ingest("session-a", [finding({
+    component_version: "1.2.3",
+    evidence_summary: "Open the queue after the documented lifecycle step.",
+  })]);
   assert.equal(first.summary.tracking, 1);
   assert.equal(first.summary.readyForReview, 0);
 
@@ -100,7 +103,12 @@ test("two independent compatible sessions produce one ready candidate while repe
   const [cluster] = store.queue();
   assert.equal(cluster?.state, "ready-for-review");
   assert.equal(cluster?.independentSessionCount, 2);
-  assert.match(store.cluster(cluster!.id)?.draft?.body ?? "", /## Summary\n/);
+  const draft = store.cluster(cluster!.id)?.draft?.body ?? "";
+  assert.match(draft, /## Summary\n/);
+  assert.match(draft, /## Impact/);
+  assert.match(draft, /Component version: 1\.2\.3/);
+  assert.match(draft, /## Safe observation/);
+  assert.match(draft, /observed in 2 independent local sessions within 90 days/);
 });
 
 test("observations older than the evidence window do not automatically corroborate", () => {
@@ -110,6 +118,38 @@ test("observations older than the evidence window do not automatically corrobora
   store.ingest("new-session", [finding()]);
   assert.equal(store.summary().readyForReview, 0);
   assert.equal(store.queue()[0]?.state, "tracking");
+});
+
+test("session reports group findings and expose only current automatic corroboration", () => {
+  const { store, advance } = fixture();
+  store.ingest("first-session", [
+    finding(),
+    finding({ classification: "local-configuration", observed: "a local setting blocks the workflow" }),
+  ]);
+  const firstReport = store.report("first-session");
+  const upstream = firstReport.findingsForSession.find((entry) => entry.classification === "documentation-gap");
+  const local = firstReport.findingsForSession.find((entry) => entry.classification === "local-configuration");
+  assert.equal(upstream?.group, "upstream-candidate");
+  assert.equal(upstream?.clusterState, "tracking");
+  assert.equal(upstream?.independentSessionCount, 1);
+  assert.equal(upstream?.additionalIndependentObservationsRequired, 1);
+  assert.equal(local?.group, "local-or-environment");
+  assert.equal(local?.clusterState, undefined);
+
+  advance(FEEDBACK_EVIDENCE_WINDOW_DAYS + 1);
+  store.ingest("later-session", [finding()]);
+  const later = store.report("later-session").findingsForSession[0];
+  assert.equal(later?.clusterState, "tracking");
+  assert.equal(later?.independentSessionCount, 1, "expired evidence must not be presented as current corroboration");
+  assert.equal(later?.additionalIndependentObservationsRequired, 1);
+  assert.equal(store.queue()[0]?.independentSessionCount, 1);
+
+  advance(1);
+  store.ingest("final-session", [finding()]);
+  const ready = store.queue()[0]!;
+  assert.equal(ready.state, "ready-for-review");
+  assert.equal(ready.independentSessionCount, 2);
+  assert.match(store.cluster(ready.id)?.draft?.body ?? "", /observed in 2 independent local sessions within 90 days/);
 });
 
 test("hard gates prevent semantic-looking findings with a different goal or owner from merging", () => {

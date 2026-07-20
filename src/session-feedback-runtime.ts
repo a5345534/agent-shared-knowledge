@@ -169,11 +169,20 @@ export type FeedbackSummary = {
   submitted: number;
 };
 
+export type FeedbackReportGroup = "local-or-environment" | "upstream-candidate" | "agent-or-workflow" | "insufficient-evidence";
+
+export type FeedbackReportFinding = Pick<FeedbackFinding,
+  "id" | "classification" | "component" | "repository" | "disposition" | "clusterId" | "createdAt"
+> & {
+  group: FeedbackReportGroup;
+  clusterState?: FeedbackClusterState;
+  independentSessionCount?: number;
+  additionalIndependentObservationsRequired?: number;
+};
+
 export type FeedbackReport = FeedbackSummary & {
   sessionFingerprint: string;
-  findingsForSession: Array<Pick<FeedbackFinding,
-    "id" | "classification" | "component" | "repository" | "disposition" | "clusterId" | "createdAt"
-  >>;
+  findingsForSession: FeedbackReportFinding[];
 };
 
 export type FeedbackClusterSummary = {
@@ -659,10 +668,32 @@ export class SessionFeedbackStore {
     this.refreshCluster(state, cluster);
   }
 
-  private refreshCluster(state: FeedbackStoreState, cluster: FeedbackCluster): void {
-    const findings = cluster.findingIds
+  private activeClusterFindings(state: FeedbackStoreState, cluster: FeedbackCluster): FeedbackFinding[] {
+    return cluster.findingIds
       .map((id) => state.findings.find((finding) => finding.id === id))
       .filter((finding): finding is FeedbackFinding => finding !== undefined && finding.disposition === "active");
+  }
+
+  private independentSessionCountWithinEvidenceWindow(findings: FeedbackFinding[]): number {
+    const dated = findings
+      .map((finding) => ({ finding, timestamp: Date.parse(finding.createdAt) }))
+      .filter((value) => Number.isFinite(value.timestamp));
+    if (dated.length === 0) return 0;
+    const latest = Math.max(...dated.map((value) => value.timestamp));
+    return new Set(dated
+      .filter((value) => latest - value.timestamp <= FEEDBACK_EVIDENCE_WINDOW_MS)
+      .map((value) => value.finding.sessionFingerprint)).size;
+  }
+
+  private reportGroup(finding: FeedbackFinding): FeedbackReportGroup {
+    if (finding.classification === "insufficient-evidence") return "insufficient-evidence";
+    if (finding.classification === "agent-behavior") return "agent-or-workflow";
+    if (upstreamEligible(finding.classification)) return "upstream-candidate";
+    return "local-or-environment";
+  }
+
+  private refreshCluster(state: FeedbackStoreState, cluster: FeedbackCluster): void {
+    const findings = this.activeClusterFindings(state, cluster);
     cluster.findingIds = findings.map((finding) => finding.id);
     if (cluster.findingIds.length === 0) {
       cluster.state = "dismissed";
@@ -670,11 +701,7 @@ export class SessionFeedbackStore {
       return;
     }
     if (cluster.state === "dismissed" || cluster.state === "linked-existing" || cluster.state === "submitted" || cluster.state === "manually-promoted") return;
-    const latest = Math.max(...findings.map((finding) => Date.parse(finding.createdAt)).filter(Number.isFinite));
-    const fingerprints = new Set(findings
-      .filter((finding) => latest - Date.parse(finding.createdAt) <= FEEDBACK_EVIDENCE_WINDOW_MS)
-      .map((finding) => finding.sessionFingerprint));
-    if (fingerprints.size >= 2) {
+    if (this.independentSessionCountWithinEvidenceWindow(findings) >= 2) {
       cluster.state = "ready-for-review";
       cluster.draft = this.buildDraft(cluster, findings, false);
     } else {
@@ -686,7 +713,7 @@ export class SessionFeedbackStore {
 
   private buildDraft(cluster: FeedbackCluster, findings: FeedbackFinding[], manuallyPromoted: boolean): IssueDraft {
     const representative = findings[0];
-    const count = new Set(findings.map((finding) => finding.sessionFingerprint)).size;
+    const count = this.independentSessionCountWithinEvidenceWindow(findings);
     const title = sanitizeSingleLine(`${cluster.component.id}: ${representative?.observed ?? cluster.classification}`, 120)
       ?? `${cluster.component.id}: ${cluster.classification}`;
     const lines = [
@@ -696,9 +723,15 @@ export class SessionFeedbackStore {
       "## Context",
       `Component: ${cluster.component.id}`,
       `Classification: ${cluster.classification}`,
+      ...(cluster.component.version ? [`Component version: ${cluster.component.version}`] : []),
       manuallyPromoted
         ? "Evidence: manually promoted by the local operator."
         : `Evidence: observed in ${count} independent local sessions within ${FEEDBACK_EVIDENCE_WINDOW_DAYS} days.`,
+      "",
+      "## Impact",
+      representative?.userGoal
+        ? `The observed gap affects this user goal: ${representative.userGoal}`
+        : "The observed gap affects the documented workflow.",
       "",
       "## Expected behavior",
       representative?.expected ?? "The documented workflow should complete predictably.",
@@ -706,6 +739,7 @@ export class SessionFeedbackStore {
       "## Actual behavior",
       representative?.observed ?? "The workflow did not complete as expected.",
     ];
+    if (representative?.evidenceSummary) lines.push("", "## Safe observation", representative.evidenceSummary);
     if (representative?.workaround) lines.push("", "## Workaround", representative.workaround);
     return {
       title,
@@ -764,15 +798,27 @@ export class SessionFeedbackStore {
     return {
       ...this.summaryFrom(state),
       sessionFingerprint,
-      findingsForSession: findings.map((finding) => ({
-        id: finding.id,
-        classification: finding.classification,
-        component: { ...finding.component },
-        ...(finding.repository ? { repository: finding.repository } : {}),
-        disposition: finding.disposition,
-        ...(finding.clusterId ? { clusterId: finding.clusterId } : {}),
-        createdAt: finding.createdAt,
-      })),
+      findingsForSession: findings.map((finding) => {
+        const cluster = finding.clusterId
+          ? state.clusters.find((candidate) => candidate.id === finding.clusterId && candidate.findingIds.includes(finding.id))
+          : undefined;
+        const independentSessionCount = cluster
+          ? this.independentSessionCountWithinEvidenceWindow(this.activeClusterFindings(state, cluster))
+          : undefined;
+        return {
+          id: finding.id,
+          classification: finding.classification,
+          component: { ...finding.component },
+          ...(finding.repository ? { repository: finding.repository } : {}),
+          disposition: finding.disposition,
+          ...(finding.clusterId ? { clusterId: finding.clusterId } : {}),
+          group: this.reportGroup(finding),
+          ...(cluster ? { clusterState: cluster.state } : {}),
+          ...(independentSessionCount !== undefined ? { independentSessionCount } : {}),
+          ...(cluster?.state === "tracking" ? { additionalIndependentObservationsRequired: Math.max(0, 2 - (independentSessionCount ?? 0)) } : {}),
+          createdAt: finding.createdAt,
+        };
+      }),
     };
   }
 
@@ -789,17 +835,15 @@ export class SessionFeedbackStore {
     return state.clusters
       .filter((cluster) => cluster.state !== "dismissed")
       .map((cluster) => {
-        const fingerprints = new Set(cluster.findingIds
-          .map((id) => state.findings.find((finding) => finding.id === id)?.sessionFingerprint)
-          .filter((value): value is string => Boolean(value)));
+        const findings = this.activeClusterFindings(state, cluster);
         return {
           id: cluster.id,
           state: cluster.state,
           repository: cluster.repository,
           componentId: cluster.component.id,
           classification: cluster.classification,
-          observationCount: cluster.findingIds.length,
-          independentSessionCount: fingerprints.size,
+          observationCount: findings.length,
+          independentSessionCount: this.independentSessionCountWithinEvidenceWindow(findings),
           title: clusterTitle(cluster),
         };
       })

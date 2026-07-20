@@ -64,7 +64,7 @@ import {
   extractionRetryInstruction,
   parseCandidateAssistantResponse,
 } from "../../src/candidate-response.ts";
-import { defaultFeedbackProvenance, SessionFeedbackStore, sanitizeFeedbackText } from "../../src/session-feedback-runtime.ts";
+import { defaultFeedbackProvenance, SessionFeedbackStore, sanitizeFeedbackText, type FeedbackReportFinding } from "../../src/session-feedback-runtime.ts";
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PROMPT_FILE = join(PACKAGE_ROOT, ".pi", "prompts", "compact-review.md");
@@ -622,15 +622,32 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     const summary = feedbackStoreFor(ctx.cwd).summary();
     return `shared-knowledge feedback: findings=${summary.findings} local-only=${summary.localOnly} insufficient=${summary.insufficient} tracking=${summary.tracking} ready=${summary.readyForReview} linked=${summary.linked} submitted=${summary.submitted}`;
   };
-  const feedbackFindingText = (id: string, store: SessionFeedbackStore) => {
-    const finding = store.finding(id);
+  const feedbackGroupLabel = (group: FeedbackReportFinding["group"]) => ({
+    "local-or-environment": "Local or environment blocker",
+    "upstream-candidate": "Upstream tracking or ready candidate",
+    "agent-or-workflow": "Agent or workflow observation",
+    "insufficient-evidence": "Insufficient evidence",
+  })[group];
+  const feedbackFindingText = (entry: FeedbackReportFinding, store: SessionFeedbackStore) => {
+    const finding = store.finding(entry.id);
     if (!finding) return undefined;
     const text = (value: string | undefined) => sanitizeFeedbackText(value, 1_200) ?? "(unavailable)";
+    const readiness = entry.clusterState === "tracking"
+      ? `Automatic readiness: ${entry.additionalIndependentObservationsRequired ?? 0} additional independent session observation(s) required.`
+      : entry.clusterState
+        ? "Automatic readiness: no further independent observation is required for the current cluster state."
+        : undefined;
     return [
+      `Report group: ${feedbackGroupLabel(entry.group)}`,
       `Classification: ${finding.classification}`,
       `Component: ${finding.component.kind}/${finding.component.id}`,
       `Repository: ${finding.repository ?? "unresolved"}`,
       `Disposition: ${finding.disposition}`,
+      ...(entry.clusterState ? [
+        `Cluster state: ${entry.clusterState}`,
+        `This session contributes to ${entry.independentSessionCount ?? 0} eligible independent session observation(s).`,
+        ...(readiness ? [readiness] : []),
+      ] : []),
       "",
       "User goal:", text(finding.userGoal),
       "",
@@ -654,10 +671,15 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       return;
     }
     const purgeLabel = "Purge all retained feedback for this session";
-    const labels = new Map(report.findingsForSession.map((finding) => [
-      `${finding.id} · ${finding.classification} · ${finding.component.id} · ${finding.clusterId ? "clustered" : "local"}`,
-      finding.id,
-    ]));
+    const labels = new Map(report.findingsForSession.map((finding) => {
+      const contribution = finding.clusterState
+        ? `${finding.clusterState} · sessions=${finding.independentSessionCount ?? 0}${finding.additionalIndependentObservationsRequired ? ` · needs=${finding.additionalIndependentObservationsRequired}` : ""}`
+        : finding.disposition;
+      return [
+        `${feedbackGroupLabel(finding.group)} · ${finding.id} · ${finding.classification} · ${finding.component.id} · ${contribution}`,
+        finding,
+      ];
+    }));
     const selected = await ctx.ui.select("Session feedback report", [...labels.keys(), purgeLabel]);
     if (!selected) return;
     if (selected === purgeLabel) {
@@ -665,10 +687,11 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       ctx.ui.notify(`shared-knowledge feedback: purged ${store.purgeSession(sessionSource)} finding(s)`, "info");
       return;
     }
-    const id = labels.get(selected);
-    if (!id) return;
+    const entry = labels.get(selected);
+    if (!entry) return;
+    const id = entry.id;
     const finding = store.finding(id);
-    const detail = feedbackFindingText(id, store);
+    const detail = feedbackFindingText(entry, store);
     if (!finding || !detail) {
       ctx.ui.notify("shared-knowledge feedback: selected finding is unavailable", "warning");
       return;
