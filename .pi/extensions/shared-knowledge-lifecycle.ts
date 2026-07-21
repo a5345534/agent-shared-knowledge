@@ -63,6 +63,9 @@ import {
   extractionFailureNotice,
   extractionRetryInstruction,
   parseCandidateAssistantResponse,
+  prefersTextJsonFallback,
+  structuredFailure,
+  CandidateResponseParseError,
 } from "../../src/candidate-response.ts";
 import { defaultFeedbackProvenance, SessionFeedbackStore, sanitizeFeedbackText, type FeedbackReportFinding } from "../../src/session-feedback-runtime.ts";
 
@@ -1006,24 +1009,60 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     const timeout = setTimeout(() => controller.abort(new Error("Background extraction timed out")), queue.config.timeoutMs ?? 120_000);
     timeout.unref();
     let response: Awaited<ReturnType<typeof complete>>;
+    let parsed: ReturnType<typeof parseCandidateAssistantResponse<Candidate>>;
     try {
-      const retryInstruction = extractionRetryInstruction(job.attempts, job.error);
-      response = await complete(model, {
-        messages: [{
-          role: "user",
-          content: [{
-            type: "text",
-            text: `${promptText()}${retryInstruction ? `\n\n${retryInstruction}` : ""}\n\nSubmit the result with the ${CANDIDATE_SUBMISSION_TOOL_NAME} tool.\n\nReview this conversation:\n\n${job.payload.conversation}`,
+      const modelKey = `${model.provider}/${model.id}`;
+      const useTextJson = prefersTextJsonFallback(modelKey) && job.attempts >= 1 && structuredFailure(job.error ?? "");
+      const runExtraction = async (mode: "tool" | "text") => {
+        const retryInstruction = extractionRetryInstruction(job.attempts, job.error, { textJsonFallback: mode === "text" });
+        const prefix = `${promptText()}${retryInstruction ? `\n\n${retryInstruction}` : ""}`;
+        if (mode === "text") {
+          return complete(model, {
+            messages: [{
+              role: "user",
+              content: [{
+                type: "text",
+                text: `${prefix}\n\nReturn exactly one JSON object with a candidates array (optional feedback_findings). Do not call tools.\n\nReview this conversation:\n\n${job.payload!.conversation}`,
+              }],
+              timestamp: Date.now(),
+            }],
+          }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: 4096, signal: controller.signal, toolChoice: "none" });
+        }
+        // Force the exact function when the OpenAI-completions adapter supports it
+        // (DeepSeek/v4 often renames tools under a bare "required" choice).
+        const toolChoice = model.api === "openai-completions"
+          ? { type: "function" as const, function: { name: CANDIDATE_SUBMISSION_TOOL_NAME } }
+          : "required" as const;
+        return complete(model, {
+          messages: [{
+            role: "user",
+            content: [{
+              type: "text",
+              text: `${prefix}\n\nSubmit the result with the ${CANDIDATE_SUBMISSION_TOOL_NAME} tool only.\n\nReview this conversation:\n\n${job.payload!.conversation}`,
+            }],
+            timestamp: Date.now(),
           }],
-          timestamp: Date.now(),
-        }],
-        tools: [CANDIDATE_SUBMISSION_TOOL],
-      }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: 4096, signal: controller.signal, toolChoice: "required" });
+          tools: [CANDIDATE_SUBMISSION_TOOL],
+        }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: 4096, signal: controller.signal, toolChoice });
+      };
+
+      response = await runExtraction(useTextJson ? "text" : "tool");
+      try {
+        parsed = parseCandidateAssistantResponse<Candidate>(response.content, response.stopReason);
+      } catch (error) {
+        // Same-attempt recovery for DeepSeek: empty/renamed tool shells often still
+        // succeed when asked for plain JSON without tools.
+        const canFallback = !useTextJson
+          && prefersTextJsonFallback(modelKey)
+          && error instanceof CandidateResponseParseError
+          && structuredFailure(error.diagnostic || error.message);
+        if (!canFallback) throw error;
+        response = await runExtraction("text");
+        parsed = parseCandidateAssistantResponse<Candidate>(response.content, response.stopReason);
+      }
     } finally {
       clearTimeout(timeout);
     }
-
-    const parsed = parseCandidateAssistantResponse<Candidate>(response.content, response.stopReason);
     const candidates = parsed.candidates
       .filter((candidate) => validateCandidate(candidate).length === 0)
       .map((candidate) => job.payload?.source ? {

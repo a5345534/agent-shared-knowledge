@@ -150,6 +150,39 @@ test("unexpected tool-only response is rejected without exposing its name or arg
   );
 });
 
+test("DeepSeek-style renamed or empty sole tool calls recover safely", () => {
+  const renamed = parseCandidateAssistantResponse([{
+    type: "toolCall",
+    name: "SubmitSharedKnowledgeCandidates",
+    arguments: { candidates: [{ candidate_id: "alias-ok" }] },
+  }], "toolUse");
+  assert.deepEqual(renamed, { candidates: [{ candidate_id: "alias-ok" }] });
+
+  const nested = parseCandidateAssistantResponse([{
+    type: "toolCall",
+    name: "submit_candidates",
+    arguments: { payload: { candidates: [], feedback_findings: [] } },
+  }], "toolUse");
+  assert.deepEqual(nested, { candidates: [], feedback_findings: [] });
+
+  // Sole empty tool shell (common after Pi partial-json normalization) is a
+  // structural tool failure, not an opaque unexpected-tool dead end.
+  assert.throws(
+    () => parseCandidateAssistantResponse([{
+      type: "toolCall",
+      name: "renamed_by_provider",
+      arguments: {},
+    }], "toolUse"),
+    (error: unknown) => {
+      assert.ok(error instanceof CandidateResponseParseError);
+      assert.equal(error.kind, "tool-arguments-normalized-empty");
+      assert.match(error.message, /soleToolRecovery=yes/);
+      assert.equal(error.message.includes("renamed_by_provider"), false);
+      return true;
+    },
+  );
+});
+
 test("assistant response falls back to bounded text when structured envelope is unusable", () => {
   const parsed = parseCandidateAssistantResponse([
     { type: "toolCall", name: "unrelated_tool", arguments: { secret: "ignored" } },
@@ -235,11 +268,13 @@ test("retry instruction is failure-kind and attempt aware", () => {
   assert.equal(extractionRetryInstruction(1, "Background extraction timed out"), "");
 
   const firstToolRetry = extractionRetryInstruction(1, "kind=tool-arguments-normalized-empty,stopReason=toolUse");
-  assert.match(firstToolRetry, /Call submit_shared_knowledge_candidates exactly once/);
+  assert.match(firstToolRetry, /Call the tool named submit_shared_knowledge_candidates exactly once/);
   assert.match(firstToolRetry, /candidates array/);
+  assert.match(firstToolRetry, /Do not invent another tool name/);
   const laterToolRetry = extractionRetryInstruction(2, "kind=unexpected-tool,stopReason=toolUse");
   assert.match(laterToolRetry, /Return no prose/);
   assert.match(laterToolRetry, /\{"candidates":\[\]\}/);
+  assert.match(laterToolRetry, /Never use any other tool name/);
   assert.notEqual(firstToolRetry, laterToolRetry);
 
   const historicalToolRetry = extractionRetryInstruction(
@@ -251,4 +286,8 @@ test("retry instruction is failure-kind and attempt aware", () => {
   const textRetry = extractionRetryInstruction(1, "Model returned invalid candidate submission (kind=text-json-invalid,bytes=10)");
   assert.match(textRetry, /Return exactly one JSON object/);
   assert.match(textRetry, /Do not use Markdown fences/);
+
+  const textFallback = extractionRetryInstruction(1, "kind=unexpected-tool", { textJsonFallback: true });
+  assert.match(textFallback, /Do not call tools/);
+  assert.match(textFallback, /\{"candidates":\[\]\}/);
 });

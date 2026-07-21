@@ -79,8 +79,54 @@ function isEnvelope(value: unknown): value is CandidateEnvelope {
   return isRecord(value) && Array.isArray(value.candidates);
 }
 
+/** Normalize tool names so DeepSeek renames/casing still match the submission tool. */
+export function normalizeToolName(name: unknown): string {
+  return typeof name === "string" ? name.toLowerCase().replace(/[^a-z0-9]+/g, "") : "";
+}
+
+const EXPECTED_TOOL_NORMALIZED = normalizeToolName(CANDIDATE_SUBMISSION_TOOL_NAME);
+const TOOL_NAME_ALIASES = new Set([
+  EXPECTED_TOOL_NORMALIZED,
+  "submitcandidates",
+  "submitsharedknowledge",
+  "sharedknowledgecandidates",
+  "submitknowledgecandidates",
+  "submitsharedknowledgecandidate",
+]);
+
+/**
+ * True when the model used the expected submission tool or a safe alias.
+ * Never logs or returns the raw name.
+ */
+export function isCandidateSubmissionToolName(name: unknown): boolean {
+  const normalized = normalizeToolName(name);
+  if (!normalized) return false;
+  if (TOOL_NAME_ALIASES.has(normalized)) return true;
+  // Providers occasionally shorten or reorder tokens while keeping the intent.
+  return normalized.includes("submit") && normalized.includes("candidate");
+}
+
+function coerceEnvelope(value: unknown): CandidateEnvelope | undefined {
+  if (isEnvelope(value)) return value;
+  if (!isRecord(value)) return undefined;
+  // Some providers nest the envelope one level under a generic key.
+  for (const nested of Object.values(value)) {
+    if (isEnvelope(nested)) return nested;
+    if (typeof nested === "string" && nested.trim()) {
+      try {
+        const parsed = JSON.parse(nested) as unknown;
+        if (isEnvelope(parsed)) return parsed;
+      } catch {
+        // Keep scanning without retaining nested content.
+      }
+    }
+  }
+  return undefined;
+}
+
 function decodeToolArguments(value: unknown): { envelope?: CandidateEnvelope; failure?: ToolFailure } {
-  if (isEnvelope(value)) return { envelope: value };
+  const coerced = coerceEnvelope(value);
+  if (coerced) return { envelope: coerced };
   if (isRecord(value)) {
     return Object.keys(value).length === 0
       ? { failure: { kind: "tool-arguments-normalized-empty", argumentShape: "empty-object" } }
@@ -99,13 +145,36 @@ function decodeToolArguments(value: unknown): { envelope?: CandidateEnvelope; fa
     } catch {
       return { failure: { kind: "tool-arguments-malformed-string", argumentShape: "malformed-string" } };
     }
-    if (isEnvelope(parsed)) return { envelope: parsed };
+    const nested = coerceEnvelope(parsed);
+    if (nested) return { envelope: nested };
     return { failure: { kind: "tool-envelope-missing-candidates", argumentShape: "string" } };
   }
   if (value === undefined || value === null) {
     return { failure: { kind: "tool-arguments-unavailable", argumentShape: "missing" } };
   }
   return { failure: { kind: "tool-arguments-unsupported", argumentShape: "unsupported" } };
+}
+
+/**
+ * Structural tool failures that can be recovered by treating a sole tool call as
+ * the submission tool (empty/missing args). Non-envelope objects stay unexpected.
+ */
+function isRecoverableSoleToolFailure(failure: ToolFailure | undefined): boolean {
+  return failure?.kind === "tool-arguments-normalized-empty"
+    || failure?.kind === "tool-arguments-unavailable"
+    || failure?.kind === "tool-arguments-malformed-string"
+    || failure?.kind === "tool-arguments-too-large"
+    || failure?.kind === "tool-arguments-unsupported";
+}
+
+function selectSubmissionToolCalls(
+  toolCalls: Array<Extract<ResponseBlock, { type: "toolCall" }>>,
+): { selected: Array<Extract<ResponseBlock, { type: "toolCall" }>>; matchedByName: number } {
+  const named = toolCalls.filter((block) => isCandidateSubmissionToolName(block.name));
+  if (named.length > 0) return { selected: named, matchedByName: named.length };
+  // When the provider renames the only tool call, still inspect its arguments.
+  if (toolCalls.length === 1) return { selected: toolCalls, matchedByName: 0 };
+  return { selected: [], matchedByName: 0 };
 }
 
 export function parseCandidateResponse<T = unknown>(raw: string): CandidateEnvelope<T> {
@@ -121,7 +190,8 @@ export function parseCandidateResponse<T = unknown>(raw: string): CandidateEnvel
     seen.add(candidate);
     try {
       const parsed = JSON.parse(candidate) as unknown;
-      if (isEnvelope(parsed)) return parsed as CandidateEnvelope<T>;
+      const envelope = coerceEnvelope(parsed);
+      if (envelope) return envelope as CandidateEnvelope<T>;
     } catch {
       // Try the next mechanically isolated candidate without retaining content.
     }
@@ -145,12 +215,18 @@ export function parseCandidateAssistantResponse<T = unknown>(
   stopReason: string,
 ): CandidateEnvelope<T> {
   const toolCalls = content.filter((block): block is Extract<ResponseBlock, { type: "toolCall" }> => block.type === "toolCall");
-  const expected = toolCalls.filter((block) => block.name === CANDIDATE_SUBMISSION_TOOL_NAME);
+  const { selected, matchedByName } = selectSubmissionToolCalls(toolCalls);
   let failure: ToolFailure | undefined;
-  for (const block of expected) {
+  let soleToolRecovered = false;
+  for (const block of selected) {
     const decoded = decodeToolArguments(block.arguments);
     if (decoded.envelope) return decoded.envelope as CandidateEnvelope<T>;
-    failure ??= decoded.failure;
+    // Only surface structural failures for name-matched tools, or for a sole
+    // tool call whose args look like a broken submission (empty/missing/etc).
+    if (matchedByName > 0 || isRecoverableSoleToolFailure(decoded.failure)) {
+      failure ??= decoded.failure;
+      if (matchedByName === 0) soleToolRecovered = true;
+    }
   }
 
   const textBlocks = content.filter((block): block is Extract<ResponseBlock, { type: "text" }> => block.type === "text");
@@ -160,13 +236,13 @@ export function parseCandidateAssistantResponse<T = unknown>(
       return parseCandidateResponse<T>(text);
     } catch (error) {
       const base = error instanceof CandidateResponseParseError ? error.diagnostic : "kind=text-json-invalid";
-      const diagnostic = `${base},stopReason=${stopReason || "unknown"},blocks=${content.length},textBlocks=${textBlocks.length},toolCalls=${toolCalls.length},expectedToolCalls=${expected.length}`;
+      const diagnostic = `${base},stopReason=${stopReason || "unknown"},blocks=${content.length},textBlocks=${textBlocks.length},toolCalls=${toolCalls.length},expectedToolCalls=${matchedByName}`;
       throw new CandidateResponseParseError("text-json-invalid", diagnostic.slice(0, 360));
     }
   }
 
   if (failure) {
-    const diagnostic = `kind=${failure.kind},stopReason=${stopReason || "unknown"},blocks=${content.length},textBlocks=${textBlocks.length},toolCalls=${toolCalls.length},expectedToolCalls=${expected.length},argumentShape=${failure.argumentShape}`;
+    const diagnostic = `kind=${failure.kind},stopReason=${stopReason || "unknown"},blocks=${content.length},textBlocks=${textBlocks.length},toolCalls=${toolCalls.length},expectedToolCalls=${matchedByName || (soleToolRecovered ? 1 : 0)},argumentShape=${failure.argumentShape}${soleToolRecovered ? ",soleToolRecovery=yes" : ""}`;
     throw new CandidateResponseParseError(failure.kind, diagnostic.slice(0, 360));
   }
   if (toolCalls.length > 0) {
@@ -201,18 +277,36 @@ export function extractionFailureNotice(
   };
 }
 
-function structuredFailure(lastError: string): boolean {
+export function structuredFailure(lastError: string): boolean {
   return /kind=(?:tool-|unexpected-tool)/i.test(lastError)
-    || /stopReason=toolUse[^)]*textBlocks=0[^)]*toolCalls=[1-9]/i.test(lastError);
+    || /stopReason=toolUse[^)]*textBlocks=0[^)]*toolCalls=[1-9]/i.test(lastError)
+    || /soleToolRecovery=yes/i.test(lastError);
 }
 
-export function extractionRetryInstruction(attempts: number, lastError?: string): string {
+/** Providers that often rename tools or emit empty tool argument shells. */
+export function prefersTextJsonFallback(providerOrModel: string): boolean {
+  return /deepseek/i.test(providerOrModel);
+}
+
+export function extractionRetryInstruction(attempts: number, lastError?: string, options?: { textJsonFallback?: boolean }): string {
   if (attempts <= 0) return "";
   const error = lastError ?? "";
+  if (options?.textJsonFallback || (/deepseek/i.test(error) && structuredFailure(error) && attempts >= 1 && /text-json-fallback/i.test(error))) {
+    // reserved for explicit text mode prompts
+  }
+  if (options?.textJsonFallback) {
+    return [
+      "A previous tool submission was unusable.",
+      "Do not call tools.",
+      "Return exactly one JSON object with a candidates array (and optional feedback_findings).",
+      'When nothing is durable, return {"candidates":[]}.',
+      "Do not use Markdown fences, a preamble, or trailing commentary.",
+    ].join(" ");
+  }
   if (structuredFailure(error)) {
     return attempts === 1
-      ? `A previous structured submission was unusable. Call ${CANDIDATE_SUBMISSION_TOOL_NAME} exactly once with an arguments object containing a candidates array; use an empty array when no durable candidates exist.`
-      : `The previous required tool call was still structurally unusable. Return no prose. Call ${CANDIDATE_SUBMISSION_TOOL_NAME} exactly once with arguments shaped exactly as {"candidates":[]}, replacing the empty array only with valid candidate objects.`;
+      ? `A previous structured submission was unusable. Call the tool named ${CANDIDATE_SUBMISSION_TOOL_NAME} exactly once with an arguments object containing a candidates array; use an empty array when no durable candidates exist. Do not invent another tool name.`
+      : `The previous required tool call was still structurally unusable. Return no prose. Call only ${CANDIDATE_SUBMISSION_TOOL_NAME} exactly once with arguments shaped exactly as {"candidates":[]}, replacing the empty array only with valid candidate objects. Never use any other tool name.`;
   }
   if (!/(?:invalid candidate JSON|kind=text-json-invalid|invalid candidate submission)/i.test(error)) return "";
   return [
