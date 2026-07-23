@@ -3,7 +3,7 @@
 
 Stdlib-only CLI that builds a local SQLite FTS5 index from curated Markdown
 shared memory entries and supports rebuild-index, list, search, resolve,
-inject, and explain subcommands.
+inject, explain, and heat subcommands.
 
 The SQLite index is a rebuildable cache; Markdown entries in
 knowledge/facts/ are the source of truth.
@@ -904,6 +904,12 @@ def cmd_search(root: Path, args: argparse.Namespace) -> int:
         # Sort by score descending
         results.sort(key=lambda r: r["score"], reverse=True)
 
+        try:
+            from knowledge_usage import emit_hits
+            emit_hits(root, event="search_hit", entries=results, command="search", query=query_text)
+        except Exception:
+            pass
+
         # Collect excluded entries (deprecated, filtered by scope, etc.)
         excluded: list[dict[str, Any]] = []
         if args.verbose:
@@ -1098,6 +1104,18 @@ def cmd_resolve(root: Path, args: argparse.Namespace) -> int:
             "results": results,
             "excluded": excluded,
         }
+
+        try:
+            from knowledge_usage import emit_hits
+            emit_hits(
+                root,
+                event="resolve_hit",
+                entries=results,
+                command="resolve",
+                query=args.query or "",
+            )
+        except Exception:
+            pass
 
         print(json.dumps(query_result, ensure_ascii=False, indent=2))
 
@@ -1482,6 +1500,19 @@ def cmd_inject(root: Path, args: argparse.Namespace) -> int:
             "entries": entry_meta,
             "rendered": injection_output,
         }
+
+        try:
+            from knowledge_usage import emit_hits
+            selected = [e for e in entry_meta if e.get("included", True) and not e.get("truncated")]
+            # Markdown path marks truncated differently; treat present meta as selected when included.
+            if not selected and entry_meta:
+                selected = [e for e in entry_meta if e.get("included", True)]
+            dropped = [e for e in entry_meta if e.get("truncated")]
+            emit_hits(root, event="inject_selected", entries=selected, command="inject", query=args.query or "")
+            if dropped:
+                emit_hits(root, event="inject_budget_dropped", entries=dropped, command="inject", query=args.query or "")
+        except Exception:
+            pass
 
         # Output just the rendered text for markdown mode (for agent consumption)
         if args.format == "markdown":
@@ -2509,7 +2540,85 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also install the legacy post-compact shell hook (deprecated, use extension instead)",
     )
 
+    heat_parser = subparsers.add_parser(
+        "heat",
+        help="Show local hot/cold knowledge usage stats (private append-only log)",
+    )
+    heat_parser.add_argument(
+        "--window-days",
+        type=int,
+        default=30,
+        help="Aggregation window in days (default: 30)",
+    )
+    heat_parser.add_argument(
+        "--top",
+        type=int,
+        default=10,
+        help="Number of hottest entries to show (default: 10)",
+    )
+    heat_parser.add_argument(
+        "--format",
+        choices=("json", "text"),
+        default="text",
+        help="Output format",
+    )
+    heat_parser.add_argument(
+        "--purge",
+        action="store_true",
+        help="Purge usage events older than --retention-days before reporting",
+    )
+    heat_parser.add_argument(
+        "--retention-days",
+        type=int,
+        default=90,
+        help="Retention days when --purge is set (default: 90)",
+    )
+
     return parser
+
+
+def cmd_heat(root: Path, args: argparse.Namespace) -> int:
+    """Aggregate private usage heat without mutating ranking."""
+    try:
+        from knowledge_usage import aggregate_heat, purge_events
+    except ImportError as exc:
+        print(f"ERROR: knowledge_usage unavailable: {exc}", file=sys.stderr)
+        return 1
+
+    purged = 0
+    if getattr(args, "purge", False):
+        purged = purge_events(root, retention_days=max(0, int(args.retention_days)))
+
+    report = aggregate_heat(
+        root,
+        window_days=max(0, int(args.window_days)),
+        top=max(0, int(args.top)),
+    )
+    report["purged"] = purged
+
+    if args.format == "json":
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"Knowledge usage heat (window={report['windowDays']}d, events={report['eventCount']}, logging={'on' if report['loggingEnabled'] else 'off'})")
+    if purged:
+        print(f"Purged {purged} old event(s)")
+    print("\nHot:")
+    if not report["hot"]:
+        print("  (none)")
+    for item in report["hot"]:
+        label = item.get("path") or item.get("entry_id") or item.get("key")
+        print(f"  {item.get('hits', 0):4d}  {label}  scope={item.get('scope') or '-'} type={item.get('type') or '-'}")
+    print(f"\nCold ({report['coldCount']} indexed facts with zero hits in window):")
+    if not report["cold"]:
+        print("  (none)")
+    else:
+        for item in report["cold"][: max(int(args.top), 0) or 10]:
+            note = f"  note={item['note']}" if item.get("note") else ""
+            print(f"  {item.get('path') or item.get('entry_id')}  scope={item.get('scope') or '-'}{note}")
+        if report["coldCount"] > (max(int(args.top), 0) or 10):
+            print(f"  … {report['coldCount'] - (max(int(args.top), 0) or 10)} more")
+    return 0
 
 
 def main() -> int:
@@ -2533,6 +2642,8 @@ def main() -> int:
         return cmd_inject(root, args)
     elif args.command == "explain":
         return cmd_explain(root, args)
+    elif args.command == "heat":
+        return cmd_heat(root, args)
     elif args.command == "migrate-layout":
         return cmd_migrate_layout(root, args)
     elif args.command == "init":

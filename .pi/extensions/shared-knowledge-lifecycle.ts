@@ -343,6 +343,16 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       `Runtime: ${queue.root}`,
       `Jobs: pending=${counts.pending} running=${counts.running} retry-wait=${counts["retry-wait"]} failed=${counts.failed} review-ready=${counts["review-ready"]}`,
       `Feedback: findings=${feedback.findings} local-only=${feedback.localOnly} tracking=${feedback.tracking} ready=${feedback.readyForReview} linked=${feedback.linked} submitted=${feedback.submitted}`,
+      (() => {
+        try {
+          const heatPath = join(queue.root, "usage", "events.jsonl");
+          if (!existsSync(heatPath)) return "Heat: events=0";
+          const lines = readFileSync(heatPath, "utf8").split("\n").filter((line) => line.trim());
+          return `Heat: events=${lines.length}`;
+        } catch {
+          return "Heat: events=0";
+        }
+      })(),
       ...model.diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),
       ...materializer.diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),
       ...publisher.diagnostics.map((diagnostic) => `Warning: ${diagnostic}`),

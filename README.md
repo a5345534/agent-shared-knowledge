@@ -263,7 +263,17 @@ python3 shared-knowledge/scripts/knowledge_query.py --root . inject --module wor
 
 # Explain why entries were selected or excluded
 python3 shared-knowledge/scripts/knowledge_query.py --root . explain --query "validation hook"
+
+# Local hot/cold usage heat (private append-only log; does not change ranking)
+python3 shared-knowledge/scripts/knowledge_query.py --root . heat --window-days 30 --top 10
+python3 shared-knowledge/scripts/knowledge_query.py --root . heat --format json
 ```
+
+Heat logging records bounded `search` / `resolve` / `inject` hits under the
+private runtime (`usage/events.jsonl`), never raw queries or session text.
+Disable with `SHARED_KNOWLEDGE_USAGE_HEAT=0`. Workspace cold entries note that
+B1 always-on index exposure is not counted as a query hit. Heat is stats-only:
+it never feeds FTS ranking or inject priority.
 
 ### Follow-up Artifact Workflow
 
