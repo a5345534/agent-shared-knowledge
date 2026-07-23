@@ -74,6 +74,7 @@ const PROMPT_FILE = join(PACKAGE_ROOT, ".pi", "prompts", "compact-review.md");
 const ABSORBER_SCRIPT = join(PACKAGE_ROOT, "scripts", "knowledge_absorb.py");
 const SOURCES_SCRIPT = join(PACKAGE_ROOT, "scripts", "knowledge_sources.py");
 const LINT_SCRIPT = join(PACKAGE_ROOT, "scripts", "knowledge_lint.py");
+const QUERY_SCRIPT = join(PACKAGE_ROOT, "scripts", "knowledge_query.py");
 
 function packageRepository(): string | undefined {
   try {
@@ -170,6 +171,45 @@ function runSourceAck(cwd: string, instanceId: string, runId: string): Promise<v
     });
     child.on("error", reject);
     child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`source ack exited ${code}`)));
+  });
+}
+
+type HeatReport = {
+  windowDays?: number;
+  eventCount?: number;
+  coldCount?: number;
+  hotCount?: number;
+  loggingEnabled?: boolean;
+  purged?: number;
+  hot?: Array<Record<string, unknown>>;
+  cold?: Array<Record<string, unknown>>;
+};
+
+function runHeatReport(cwd: string, windowDays: number, options?: { purge?: boolean; retentionDays?: number }): Promise<HeatReport> {
+  if (!existsSync(QUERY_SCRIPT)) return Promise.reject(new Error("knowledge-query script unavailable"));
+  const args = [QUERY_SCRIPT, "--root", cwd, "heat", "--window-days", String(windowDays), "--top", "50", "--format", "json"];
+  if (options?.purge) {
+    args.push("--purge", "--retention-days", String(options.retentionDays ?? 90));
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn("python3", args, { cwd, shell: false, timeout: 60_000 });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => { stdout += String(chunk); if (stdout.length > 2_000_000) stdout = stdout.slice(0, 2_000_000); });
+    child.stderr?.on("data", (chunk) => { stderr += String(chunk); if (stderr.length > 8_000) stderr = stderr.slice(-8_000); });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`heat report failed (exit ${code})`));
+        return;
+      }
+      try {
+        const parsed = JSON.parse(stdout) as HeatReport;
+        resolve(parsed && typeof parsed === "object" ? parsed : {});
+      } catch {
+        reject(new Error("heat report returned invalid JSON"));
+      }
+    });
   });
 }
 
@@ -857,6 +897,105 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
     }
   };
 
+  const openHeatUi = async (ctx: ExtensionContext) => {
+    if (ctx.mode !== "tui") {
+      let events = 0;
+      try {
+        const heatPath = join(viewQueueFor(ctx.cwd).root, "usage", "events.jsonl");
+        if (existsSync(heatPath)) {
+          events = readFileSync(heatPath, "utf8").split("\n").filter((line) => line.trim()).length;
+        }
+      } catch {
+        events = 0;
+      }
+      ctx.ui.notify(`shared-knowledge heat: events=${events}\nOpen /knowledge-heat in local TUI for hot/cold reports.`, "info");
+      return;
+    }
+    const windowLabel = await ctx.ui.select("Heat window (days)", ["7", "30", "90"]);
+    if (!windowLabel) return;
+    const windowDays = Number(windowLabel);
+    const load = async (purge = false) => {
+      try {
+        return await runHeatReport(ctx.cwd, windowDays, purge ? { purge: true, retentionDays: 90 } : undefined);
+      } catch {
+        ctx.ui.notify("shared-knowledge heat: report unavailable (is the query index built?)", "warning");
+        return undefined;
+      }
+    };
+    let report = await load(false);
+    if (!report) return;
+    while (true) {
+      const view = await ctx.ui.select("Knowledge usage heat", [
+        `Summary · events=${report.eventCount ?? 0} · cold=${report.coldCount ?? 0} · logging=${report.loggingEnabled === false ? "off" : "on"}`,
+        "Hot entries",
+        "Cold · module/capability",
+        "Cold · workspace (B1 note)",
+        "Purge usage events older than 90 days",
+        "Close",
+      ]);
+      if (!view || view === "Close") return;
+      if (view.startsWith("Summary")) {
+        await ctx.ui.editor("Heat summary", [
+          `Window days: ${report.windowDays ?? windowDays}`,
+          `Events in window: ${report.eventCount ?? 0}`,
+          `Hot listed: ${report.hotCount ?? (report.hot?.length ?? 0)}`,
+          `Cold indexed (zero hits): ${report.coldCount ?? 0}`,
+          `Logging: ${report.loggingEnabled === false ? "off" : "on"}`,
+          "", 
+          "B1 always-on index exposure is not counted as a query hit.",
+          "Heat is stats-only and does not change search ranking.",
+        ].join("\n"));
+        continue;
+      }
+      if (view === "Purge usage events older than 90 days") {
+        if (!await ctx.ui.confirm("Purge usage events", "Removes only private usage-log events older than 90 days. Does not modify knowledge facts, the FTS index, or Git. Continue?")) continue;
+        report = await load(true) ?? report;
+        ctx.ui.notify(`shared-knowledge heat: purged ${report.purged ?? 0} event(s)`, "info");
+        continue;
+      }
+      const cold = Array.isArray(report.cold) ? report.cold : [];
+      const hot = Array.isArray(report.hot) ? report.hot : [];
+      let rows: Array<Record<string, unknown>> = [];
+      if (view === "Hot entries") rows = hot;
+      else if (view === "Cold · module/capability") {
+        rows = cold.filter((item) => {
+          const scope = String(item.scope ?? "");
+          return scope.startsWith("module:") || scope.startsWith("capability:");
+        });
+      } else if (view === "Cold · workspace (B1 note)") {
+        rows = cold.filter((item) => String(item.scope ?? "") === "workspace" || String(item.scope ?? "").startsWith("workspace"));
+      }
+      if (rows.length === 0) {
+        ctx.ui.notify("shared-knowledge heat: no entries in this view", "info");
+        continue;
+      }
+      const labels = new Map(rows.slice(0, 50).map((item, index) => {
+        const path = String(item.path ?? item.entry_id ?? item.key ?? `entry-${index}`);
+        const hits = item.hits ?? 0;
+        const scope = item.scope ?? "-";
+        return [`${hits} · ${path} · ${scope}`, item];
+      }));
+      const selected = await ctx.ui.select("Select heat entry", [...labels.keys()]);
+      if (!selected) continue;
+      const item = labels.get(selected);
+      if (!item) continue;
+      const detail = [
+        `Path: ${item.path ?? "(none)"}`,
+        `Entry id: ${item.entry_id ?? "(none)"}`,
+        `Scope: ${item.scope ?? "(none)"}`,
+        `Type: ${item.type ?? "(none)"}`,
+        `Hits (window): ${item.hits ?? 0}`,
+        item.note ? `Note: ${item.note}` : undefined,
+        item.name ? `Name: ${item.name}` : undefined,
+      ].filter(Boolean).join("\n");
+      await ctx.ui.editor("Heat entry metadata", detail);
+    }
+  };
+
+  pi.registerCommand("knowledge-heat", {
+    description: "View local knowledge usage heat (hot/cold) in TUI",
+    handler: async (_args, ctx) => openHeatUi(ctx),
+  });
   pi.registerCommand("knowledge-feedback", {
     description: "View the private quality report for the current Shared Knowledge session",
     handler: async (_args, ctx) => openFeedbackUi(ctx),
@@ -970,6 +1109,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
         "Review ready candidates",
         "View session feedback report",
         "Open upstream issue queue",
+        "View knowledge usage heat",
         "Show status",
       ]);
       if (action === "Change extraction model") await configureModelInteractively(ctx);
@@ -987,6 +1127,7 @@ export default function sharedKnowledgeLifecycle(pi: ExtensionAPI) {
       else if (action === "Review ready candidates") await openReviewUi(ctx);
       else if (action === "View session feedback report") await openFeedbackUi(ctx);
       else if (action === "Open upstream issue queue") await openIssueQueueUi(ctx);
+      else if (action === "View knowledge usage heat") await openHeatUi(ctx);
       else if (action === "Show status") showStatus(ctx);
     },
   });

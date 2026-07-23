@@ -28,7 +28,7 @@ test("extension configures materializers and recovers jobs without foreground mu
   };
   sharedKnowledgeLifecycle(pi as never);
   assert.deepEqual([...commands.keys()].sort(), [
-    "knowledge-config", "knowledge-feedback", "knowledge-issue-queue", "knowledge-jobs", "knowledge-materializer", "knowledge-model", "knowledge-publisher", "knowledge-review", "knowledge-status",
+    "knowledge-config", "knowledge-feedback", "knowledge-heat", "knowledge-issue-queue", "knowledge-jobs", "knowledge-materializer", "knowledge-model", "knowledge-publisher", "knowledge-review", "knowledge-status",
   ]);
 
   const root = mkdtempSync(join(tmpdir(), "knowledge-config-extension-"));

@@ -455,6 +455,7 @@ shared with other users and does not create GitHub issues automatically.
 
 ```text
 /knowledge-feedback       # current session's local quality report
+/knowledge-heat           # local TUI hot/cold usage heat (CLI: knowledge-query heat)
 /knowledge-issue-queue    # private cross-session upstream candidates
 ```
 
